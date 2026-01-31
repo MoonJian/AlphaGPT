@@ -27,3 +27,32 @@ class MemeBacktest:
         score = torch.where(activity < 5, torch.tensor(-10.0, device=score.device), score)
         final_fitness = torch.median(score)
         return final_fitness, cum_ret.mean().item()
+    
+
+class MainCoinBacktest:
+    def __init__(self):
+        self.trade_size = 1000.0
+        self.base_fee = 0.0005
+
+    def evaluate(self, factors, raw_data, target_ret):
+
+        signal = torch.sigmoid(factors)
+
+        position = (signal > 0.85).float() 
+        
+        impact_slippage = 0.0001
+        total_slippage_one_way = self.base_fee + impact_slippage
+        prev_pos = torch.roll(position, 1, dims=1)
+        prev_pos[:, 0] = 0
+        turnover = torch.abs(position - prev_pos)
+        tx_cost = turnover * total_slippage_one_way
+        
+        gross_pnl = position * target_ret
+        net_pnl = gross_pnl - tx_cost
+        cum_ret = net_pnl.sum(dim=1)
+        big_drawdowns = (net_pnl < -0.05).float().sum(dim=1)
+        score = cum_ret - (big_drawdowns * 2.0)
+        activity = position.sum(dim=1)
+        score = torch.where(activity < 5, torch.tensor(-10.0, device=score.device), score)
+        final_fitness = torch.median(score)
+        return final_fitness, cum_ret.mean().item()

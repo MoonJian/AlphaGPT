@@ -10,8 +10,9 @@ import math
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-TS_TOKEN = '20af39742f461b1edc79ff0aec09c8940265babe0c6733e7bf358078'
-INDEX_CODE = '511260.SH'
+TS_TOKEN = 'ee923498e4531b9513bc9aed77aed79401e54d26b1e7934d295b0201'
+# INDEX_CODE = '511260.SH'
+INDEX_CODE = '518880.SH'
 START_DATE = '20150101' # 训练数据开始
 END_DATE = '20240101' # 训练数据结束
 TEST_END_DATE = '20250101' # 测试时间结束

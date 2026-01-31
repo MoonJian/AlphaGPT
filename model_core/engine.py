@@ -7,10 +7,10 @@ from .config import ModelConfig
 from .data_loader import CryptoDataLoader
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
-from .backtest import MemeBacktest
+from .backtest import MemeBacktest, MainCoinBacktest
 
 class AlphaEngine:
-    def __init__(self, use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
+    def __init__(self, data_path='/mnt/h/data/crypto/tardis_futures_processed/dynamic_dollar_bar/ETHUSDT_dynamic_dollar_bars_2020-01-01-2025-10-01_15d-002pct.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
         """
         Initialize AlphaGPT training engine.
         
@@ -19,8 +19,8 @@ class AlphaEngine:
             lord_decay_rate: Strength of LoRD regularization
             lord_num_iterations: Number of Newton-Schulz iterations per step
         """
-        self.loader = CryptoDataLoader()
-        self.loader.load_data()
+        self.loader = CryptoDataLoader(data_path)        
+        self.loader.load_data()    
         
         self.model = AlphaGPT().to(ModelConfig.DEVICE)
         
@@ -45,7 +45,7 @@ class AlphaEngine:
             self.rank_monitor = None
         
         self.vm = StackVM()
-        self.bt = MemeBacktest()
+        self.bt = MainCoinBacktest()
         
         self.best_score = -float('inf')
         self.best_formula = None

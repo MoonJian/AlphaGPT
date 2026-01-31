@@ -162,16 +162,16 @@ class FeatureEngineer:
         o = raw_dict['open']
         h = raw_dict['high']
         l = raw_dict['low']
-        v = raw_dict['volume']
-        liq = raw_dict['liquidity']
-        fdv = raw_dict['fdv']
+        # v = raw_dict['volume']
+        # liq = raw_dict['liquidity']
+        # fdv = raw_dict['fdv']
         
         ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))
-        liq_score = MemeIndicators.liquidity_health(liq, fdv)
+        # liq_score = MemeIndicators.liquidity_health(liq, fdv)
         pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
-        fomo = MemeIndicators.fomo_acceleration(v)
+        # fomo = MemeIndicators.fomo_acceleration(v)
         dev = MemeIndicators.pump_deviation(c)
-        log_vol = torch.log1p(v)
+        # log_vol = torch.log1p(v)
         
         def robust_norm(t):
             median = torch.nanmedian(t, dim=1, keepdim=True)[0]
@@ -181,11 +181,11 @@ class FeatureEngineer:
 
         features = torch.stack([
             robust_norm(ret),
-            liq_score,
+            # liq_score,
             pressure,
-            robust_norm(fomo),
+            # robust_norm(fomo),
             robust_norm(dev),
-            robust_norm(log_vol)
+            # robust_norm(log_vol)
         ], dim=1)
         
         return features
