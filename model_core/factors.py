@@ -189,3 +189,72 @@ class FeatureEngineer:
         ], dim=1)
         
         return features
+
+
+class KlinesFeatureEngineer:
+    INPUT_DIM = 6
+
+    @staticmethod
+    def compute_features(raw_dict):
+        c = raw_dict['close']
+        o = raw_dict['open']
+        h = raw_dict['high']
+        l = raw_dict['low']        
+        v = raw_dict['volume']
+        buy_v = raw_dict['taker_buy_volume']
+        
+        ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))        
+        pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
+        fomo = MemeIndicators.fomo_acceleration(v)
+        dev = MemeIndicators.pump_deviation(c)
+        log_vol = torch.log1p(v)
+        log_buy_vol = torch.log1p(buy_v)
+
+        # 替换原来的 robust_norm 函数
+        @torch.jit.script
+        def robust_norm_rolling(x: torch.Tensor, window: int = 960) -> torch.Tensor:
+            """
+            PyTorch版滚动Robust Normalization (针对 1D 或 2D Tensor)
+            x: [T] 或 [B, T]
+            window: 滚动窗口大小
+            """
+            # 统一处理成 [B, T] 格式，方便批量处理
+            if x.dim() == 1:
+                x = x.unsqueeze(0)
+            
+            B, T = x.shape
+            device = x.device
+            
+            # 1. 为了保持输出长度一致，在左侧填充 (Padding)
+            # 使用第一个值填充，或者填0。这里建议用第一个有效值填充，减少边缘效应
+            pad = x[:, 0:1].repeat(1, window - 1)
+            x_padded = torch.cat([pad, x], dim=1) # [B, T + window - 1]
+            
+            # 2. 利用 unfold 展开滑动窗口 -> [B, T, window]
+            windows = x_padded.unfold(1, window, 1)
+            
+            # 3. 计算滚动中位数 (Rolling Median)
+            # torch.median 返回一个 namedtuple (values, indices)
+            roll_median = windows.median(dim=-1).values # [B, T]
+            
+            # 4. 计算滚动 MAD
+            # MAD = Median(|x - Median|)
+            abs_diff = torch.abs(windows - roll_median.unsqueeze(-1))
+            roll_mad = abs_diff.median(dim=-1).values + 1e-6 # [B, T]
+            
+            # 5. 计算结果并截断 (Clip)
+            res = (x - roll_median) / roll_mad
+            res = torch.clamp(res, -5.0, 5.0)
+            
+            return res # 如果输入是1D，返回1D
+
+        features = torch.stack([
+            robust_norm_rolling(ret),
+            pressure,
+            robust_norm_rolling(fomo),
+            robust_norm_rolling(dev),
+            robust_norm_rolling(log_vol),
+            robust_norm_rolling(log_buy_vol)
+        ], dim=1)
+        
+        return features
