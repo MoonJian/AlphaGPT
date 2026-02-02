@@ -20,7 +20,7 @@ class JITFormulaCompiler:
         
         # 将 OPS_CONFIG 中的 lambda 和函数映射到字符串表达式
         self.op_to_str = {
-            'INDENTIFY': "x0",
+            # 'INDENTIFY': "x0",
             'ADD': "(x0 + x1)",
             'SUB': "(x0 - x1)",
             'MUL': "(x0 * x1)",

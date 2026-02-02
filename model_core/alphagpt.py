@@ -268,5 +268,7 @@ class AlphaGPT(nn.Module):
         # Multi-task pooling head for logits
         logits, task_probs = self.mtp_head(last_emb)
         value = self.head_critic(last_emb)
+
+        print('logits shape: ', logits[0])
         
         return logits, value, task_probs

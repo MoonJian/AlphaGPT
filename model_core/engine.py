@@ -74,6 +74,7 @@ class AlphaEngine:
             tokens_list = []
             
             for _ in range(ModelConfig.MAX_FORMULA_LEN):
+                # 需要一份代码动态计算栈顶还有多少元素
                 logits, _, _ = self.model(inp)
                 dist = Categorical(logits=logits)
                 action = dist.sample()
@@ -86,6 +87,7 @@ class AlphaEngine:
             
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
             
+            legal_cnt = 0
             for i in range(bs):
                 formula = seqs[i].tolist()
                 
@@ -108,6 +110,8 @@ class AlphaEngine:
                     rewards[i] = -2.0
                     continue
                 
+                legal_cnt += 1
+
                 # print('proper formulas generated...')
                 score, ret_val = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret)
                 rewards[i] = score
@@ -117,6 +121,7 @@ class AlphaEngine:
                     self.best_formula = formula
                     tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula}")
             
+            print(f'legal cnt/bs: {legal_cnt}/{bs}, legal ratio: {legal_cnt/bs}')
             # Normalize rewards
             adv = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
             
