@@ -11,7 +11,7 @@ from .formula import JITFormulaCompiler
 from .backtest import MemeBacktest, MainCoinBacktest
 
 class AlphaEngine:
-    def __init__(self, data_path='./data/ETHUSDT-futures_15m_2020-01-01-2026-02-01.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
+    def __init__(self, data_path='./data/ETHUSDT-futures_1h_2020-01-01-2026-02-02.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
         """
         Initialize AlphaGPT training engine.
         
@@ -72,16 +72,19 @@ class AlphaEngine:
             
             log_probs = []
             tokens_list = []
+            stack_sizes = torch.zeros(bs, dtype=torch.int32).to(inp.device)
             
             for _ in range(ModelConfig.MAX_FORMULA_LEN):
                 # 需要一份代码动态计算栈顶还有多少元素
-                logits, _, _ = self.model(inp)
+                logits, _, _ = self.model(inp, stack_sizes)
                 dist = Categorical(logits=logits)
                 action = dist.sample()
                 
                 log_probs.append(dist.log_prob(action))
                 tokens_list.append(action)
                 inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
+
+                stack_sizes = self.model.compute_stack_size(stack_sizes, action)
             
             seqs = torch.stack(tokens_list, dim=1)
             

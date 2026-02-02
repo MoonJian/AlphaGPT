@@ -225,6 +225,7 @@ class AlphaGPT(nn.Module):
         # self.features_list = ['RET', 'VOL', 'V_CHG', 'PV', 'TREND']
         self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL']
         self.ops_list = [cfg[0] for cfg in OPS_CONFIG]
+        self.ops_arities = [cfg[2] for cfg in OPS_CONFIG]
         
         self.vocab = self.features_list + self.ops_list
         self.vocab_size = len(self.vocab)
@@ -250,7 +251,32 @@ class AlphaGPT(nn.Module):
         self.mtp_head = MTPHead(self.d_model, self.vocab_size, num_tasks=3)
         self.head_critic = nn.Linear(self.d_model, 1)
 
-    def forward(self, idx):
+        self._build_valid_masks()
+
+    def _build_valid_masks(self):
+        # A smart implementation
+        self.valid_masks = {}
+        len_features = len(self.features_list)
+        ops_arities_tensor = torch.LongTensor(self.ops_arities)
+
+        for stack in range(ModelConfig.MAX_FORMULA_LEN):
+            mask = torch.zeros(self.vocab_size)
+            mask[:len_features] = 1 # 操作数总是合法的
+            for arity in ops_arities_tensor.unique().tolist():
+                if stack >= arity:
+                    indices = torch.where(ops_arities_tensor == arity)[0]
+                    mask[len_features+indices] = 1
+            self.valid_masks[stack] = mask
+
+    def compute_stack_size(self, stack_sizes, actions):
+        feat_indices = torch.where(actions < len(self.features_list))
+        stack_sizes[feat_indices] += 1
+        for i in range(len(self.features_list), self.vocab_size):
+            indices = torch.where(actions == i)
+            stack_sizes[feat_indices] -= self.ops_arities[i-len(self.features_list)] - 1
+        return stack_sizes
+
+    def forward(self, idx, stack_sizes):
         # idx: [Batch, SeqLen]
         B, T = idx.size()
         
@@ -269,6 +295,12 @@ class AlphaGPT(nn.Module):
         logits, task_probs = self.mtp_head(last_emb)
         value = self.head_critic(last_emb)
 
-        print('logits shape: ', logits[0])
+        masked_logits = torch.zeros_like(logits)
+        for i in range(B):
+            stack = stack_sizes[i].item()
+            if stack not in self.valid_masks:
+                raise Exception(f"Stack size {stack} not found in valid stack mask!")
+            mask = self.valid_masks[stack].to(logits.device)
+            masked_logits[i] = logits[i].masked_fill(mask==0, -1e9)
         
-        return logits, value, task_probs
+        return masked_logits, value, task_probs
