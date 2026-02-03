@@ -75,16 +75,20 @@ class AlphaEngine:
             stack_sizes = torch.zeros(bs, dtype=torch.int32).to(inp.device)
             
             for _ in range(ModelConfig.MAX_FORMULA_LEN):
-                # 需要一份代码动态计算栈顶还有多少元素
+                # 需要一份代码动态计算栈顶还有多少元素                
                 logits, _, _ = self.model(inp, stack_sizes)
                 dist = Categorical(logits=logits)
                 action = dist.sample()
                 
                 log_probs.append(dist.log_prob(action))
                 tokens_list.append(action)
-                inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
+                inp = torch.cat([inp, action.unsqueeze(1)], dim=1)                
 
                 stack_sizes = self.model.compute_stack_size(stack_sizes, action)
+                print(stack_sizes[0])
+                print(inp[0])
+                if stack_sizes[0].item() < 0:
+                    assert 0
             
             seqs = torch.stack(tokens_list, dim=1)
             

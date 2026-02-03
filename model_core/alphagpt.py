@@ -251,7 +251,13 @@ class AlphaGPT(nn.Module):
         self.mtp_head = MTPHead(self.d_model, self.vocab_size, num_tasks=3)
         self.head_critic = nn.Linear(self.d_model, 1)
 
-        self._build_valid_masks()
+        # self._build_valid_masks()
+
+        self.feat_offset = len(self.features_list)
+        self.max_len = ModelConfig.MAX_FORMULA_LEN
+        self.max_stack = ModelConfig.MAX_FORMULA_LEN
+        self.max_arity = max(self.ops_arities)
+        self._precompute_valid_mask()
 
     def _build_valid_masks(self):
         # A smart implementation
@@ -268,17 +274,59 @@ class AlphaGPT(nn.Module):
                     mask[len_features+indices] = 1
             self.valid_masks[stack] = mask
 
-    def compute_stack_size(self, stack_sizes, actions):
+    def _precompute_valid_mask(self):
+        """
+        预计算所有(stack_size, remaining_steps, token)组合的合法性
+        形状: [max_stack+1, max_len+1, vocab_size]
+        """
+        mask_3d = torch.zeros((self.max_stack + 1, self.max_len + 1, self.vocab_size), dtype=torch.bool)
+        for s in range(self.max_stack + 1):          # 当前栈深度
+            for r in range(1, self.max_len + 1):     # 剩余步数 (≥1)
+                for token_id in range(self.vocab_size):
+                    valid = False
+                    
+                    if token_id < self.feat_offset:  # 特征加载
+                        # 最后一步不能是特征（否则栈深度>1）
+                        if r == 1:
+                            valid = False
+                        else:
+                            # 条件: s ≤ (r-1) × (max_arity - 1)
+                            max_reducible = (r - 1) * (self.max_arity - 1)
+                            valid = (s <= max_reducible)
+                    
+                    else:  # 操作符
+                        op_idx = token_id - self.feat_offset
+                        a = self.ops_arities[op_idx]
+                        
+                        # 基本合法性: 栈深度 ≥ 操作数
+                        if s < a:
+                            valid = False
+                        else:
+                            new_s = s - a + 1  # 操作后栈深度
+                            
+                            if r == 1:  # 最后一步
+                                valid = (new_s == 1)  # 必须恰好剩1个元素
+                            else:
+                                # 条件: new_s - 1 ≤ (r-1) × (max_arity - 1)
+                                max_reducible = (r - 1) * (self.max_arity - 1)
+                                valid = (new_s - 1 <= max_reducible)
+                    
+                    mask_3d[s, r, token_id] = valid
+        
+        self.register_buffer('valid_mask_3d', mask_3d)  # 注册为buffer，随模型移动设备        
+
+    def compute_stack_size(self, stack_sizes, actions):        
         feat_indices = torch.where(actions < len(self.features_list))
         stack_sizes[feat_indices] += 1
-        for i in range(len(self.features_list), self.vocab_size):
-            indices = torch.where(actions == i)
-            stack_sizes[feat_indices] -= self.ops_arities[i-len(self.features_list)] - 1
+        for i in range(len(self.features_list), self.vocab_size):            
+            indices = torch.where(actions == i)            
+            stack_sizes[indices] -= self.ops_arities[i-len(self.features_list)] - 1
         return stack_sizes
 
     def forward(self, idx, stack_sizes):
         # idx: [Batch, SeqLen]
         B, T = idx.size()
+        r = ModelConfig.MAX_FORMULA_LEN - T
         
         x = self.token_emb(idx) + self.pos_emb[:, :T, :]
         
@@ -295,6 +343,7 @@ class AlphaGPT(nn.Module):
         logits, task_probs = self.mtp_head(last_emb)
         value = self.head_critic(last_emb)
 
+        '''
         masked_logits = torch.zeros_like(logits)
         for i in range(B):
             stack = stack_sizes[i].item()
@@ -302,5 +351,9 @@ class AlphaGPT(nn.Module):
                 raise Exception(f"Stack size {stack} not found in valid stack mask!")
             mask = self.valid_masks[stack].to(logits.device)
             masked_logits[i] = logits[i].masked_fill(mask==0, -1e9)
+        '''
+
+        batch_mask = self.valid_mask_3d[stack_sizes, r, :]
+        masked_logits = logits.masked_fill(~batch_mask, -1e9)
         
         return masked_logits, value, task_probs
