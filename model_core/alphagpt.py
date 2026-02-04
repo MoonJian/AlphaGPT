@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .config import ModelConfig
-from .ops import OPS_CONFIG
+from .ops import OPS_CONFIG, OPS_NORM_CONFIG
 
 
 class NewtonSchulzLowRankDecay:
@@ -224,11 +224,17 @@ class AlphaGPT(nn.Module):
         self.d_model = 64
         # self.features_list = ['RET', 'VOL', 'V_CHG', 'PV', 'TREND']
         self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL']
-        self.ops_list = [cfg[0] for cfg in OPS_CONFIG]
-        self.ops_arities = [cfg[2] for cfg in OPS_CONFIG]
+        self.ops_list = [cfg[0] for cfg in OPS_CONFIG] 
+        self.ops_norm_list = [cfg[0] for cfg in OPS_NORM_CONFIG]
+        self.ops_arities = [cfg[2] for cfg in OPS_CONFIG] 
+        self.ops_norm_arities = [cfg[2] for cfg in OPS_NORM_CONFIG]
+        self.ops_all_list = self.ops_list + self.ops_norm_list
+        self.ops_all_arities = self.ops_arities + self.ops_norm_arities
         
-        self.vocab = self.features_list + self.ops_list
+        self.vocab = self.features_list + self.ops_list + self.ops_norm_list
         self.vocab_size = len(self.vocab)
+        self.feat_ops_size = len(self.features_list + self.ops_list)
+        self.ops_norm_size = len(self.ops_norm_list)
         
         # Embedding
         self.token_emb = nn.Embedding(self.vocab_size, self.d_model)
@@ -259,21 +265,6 @@ class AlphaGPT(nn.Module):
         self.max_arity = max(self.ops_arities)
         self._precompute_valid_mask()
 
-    def _build_valid_masks(self):
-        # A smart implementation
-        self.valid_masks = {}
-        len_features = len(self.features_list)
-        ops_arities_tensor = torch.LongTensor(self.ops_arities)
-
-        for stack in range(ModelConfig.MAX_FORMULA_LEN):
-            mask = torch.zeros(self.vocab_size)
-            mask[:len_features] = 1 # 操作数总是合法的
-            for arity in ops_arities_tensor.unique().tolist():
-                if stack >= arity:
-                    indices = torch.where(ops_arities_tensor == arity)[0]
-                    mask[len_features+indices] = 1
-            self.valid_masks[stack] = mask
-
     def _precompute_valid_mask(self):
         """
         预计算所有(stack_size, remaining_steps, token)组合的合法性
@@ -294,7 +285,7 @@ class AlphaGPT(nn.Module):
                             max_reducible = (r - 1) * (self.max_arity - 1)
                             valid = (s <= max_reducible)
                     
-                    else:  # 操作符
+                    elif token_id < self.feat_ops_size:  # 操作符
                         op_idx = token_id - self.feat_offset
                         a = self.ops_arities[op_idx]
                         
@@ -313,6 +304,7 @@ class AlphaGPT(nn.Module):
                     
                     mask_3d[s, r, token_id] = valid
         
+        mask_3d[1, 0, -self.ops_norm_size:] = True # 最后ops norm的范围
         self.register_buffer('valid_mask_3d', mask_3d)  # 注册为buffer，随模型移动设备        
 
     def compute_stack_size(self, stack_sizes, actions):        
@@ -320,13 +312,13 @@ class AlphaGPT(nn.Module):
         stack_sizes[feat_indices] += 1
         for i in range(len(self.features_list), self.vocab_size):            
             indices = torch.where(actions == i)            
-            stack_sizes[indices] -= self.ops_arities[i-len(self.features_list)] - 1
+            stack_sizes[indices] -= self.ops_all_arities[i-len(self.features_list)] - 1
         return stack_sizes
 
     def forward(self, idx, stack_sizes):
         # idx: [Batch, SeqLen]
         B, T = idx.size()
-        r = ModelConfig.MAX_FORMULA_LEN - T
+        r = ModelConfig.MAX_FORMULA_LEN - T + 1
         
         x = self.token_emb(idx) + self.pos_emb[:, :T, :]
         

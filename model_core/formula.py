@@ -1,13 +1,13 @@
 import torch
-from .ops import _op_gate, _op_jump, _op_decay, _ts_delay, OPS_CONFIG
+from .ops import _op_gate, _op_jump, _op_decay, _ts_delay, _op_tanh, _op_ts_zscore_rolling, OPS_CONFIG, OPS_NORM_CONFIG
 from .factors import FeatureEngineer, KlinesFeatureEngineer
 
 class JITFormulaCompiler:
     def __init__(self):
         self.feat_offset = KlinesFeatureEngineer.INPUT_DIM
         # 建立索引与算子名称、参数数量的映射
-        self.op_names = [cfg[0] for cfg in OPS_CONFIG]
-        self.arities = [cfg[2] for cfg in OPS_CONFIG]
+        self.op_names = [cfg[0] for cfg in OPS_CONFIG] + [cfg[0] for cfg in OPS_NORM_CONFIG]
+        self.arities = [cfg[2] for cfg in OPS_CONFIG] + [cfg[2] for cfg in OPS_NORM_CONFIG]
         
         # 建立命名空间，让编译后的代码能找到这些自定义算子
         self.context = {
@@ -15,7 +15,9 @@ class JITFormulaCompiler:
             '_op_gate': _op_gate,
             '_op_jump': _op_jump,
             '_op_decay': _op_decay,
-            '_ts_delay': _ts_delay
+            '_ts_delay': _ts_delay,
+            '_op_tanh': _op_tanh,
+            '_op_ts_zscore_rolling': _op_ts_zscore_rolling
         }
         
         # 将 OPS_CONFIG 中的 lambda 和函数映射到字符串表达式
@@ -32,7 +34,9 @@ class JITFormulaCompiler:
             'JUMP': "_op_jump(x0)",
             'DECAY': "_op_decay(x0)",
             'DELAY1': "_ts_delay(x0, 1)",
-            'MAX3': "torch.max(x0, torch.max(_ts_delay(x0, 1), _ts_delay(x0, 2)))"
+            'MAX3': "torch.max(x0, torch.max(_ts_delay(x0, 1), _ts_delay(x0, 2)))",
+            # 'TANH': "_op_tanh(x0)",
+            'ZSCORE_ROLL': "_op_ts_zscore_rolling(x0)"
         }
 
     def compile(self, formula_tokens):

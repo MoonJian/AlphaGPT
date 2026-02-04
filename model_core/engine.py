@@ -74,7 +74,8 @@ class AlphaEngine:
             tokens_list = []
             stack_sizes = torch.zeros(bs, dtype=torch.int32).to(inp.device)
             
-            for _ in range(ModelConfig.MAX_FORMULA_LEN):
+            # 最后一个op是norm归一化操作符
+            for _ in range(ModelConfig.MAX_FORMULA_LEN + 1):
                 # 需要一份代码动态计算栈顶还有多少元素                
                 logits, _, _ = self.model(inp, stack_sizes)
                 dist = Categorical(logits=logits)
@@ -84,11 +85,7 @@ class AlphaEngine:
                 tokens_list.append(action)
                 inp = torch.cat([inp, action.unsqueeze(1)], dim=1)                
 
-                stack_sizes = self.model.compute_stack_size(stack_sizes, action)
-                print(stack_sizes[0])
-                print(inp[0])
-                if stack_sizes[0].item() < 0:
-                    assert 0
+                stack_sizes = self.model.compute_stack_size(stack_sizes, action)        
             
             seqs = torch.stack(tokens_list, dim=1)
             
@@ -104,17 +101,21 @@ class AlphaEngine:
 
                 # 在几十万行数据上运行只需数毫秒
                 if fast_factor_func is None:
-                    rewards[i] = -5.0
+                    rewards[i] = -5.0                    
                     continue
 
                 res = fast_factor_func(self.loader.feat_tensor)
                 
                 if res is None:
+                    print(formula)
                     rewards[i] = -5.0
                     continue
 
                 if res.std() < 1e-4:
-                    rewards[i] = -2.0
+                    rewards[i] = -10.0
+                    # print(formula)
+                    # print(res)
+                    # assert 0
                     continue
                 
                 legal_cnt += 1

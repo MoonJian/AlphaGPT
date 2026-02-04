@@ -36,11 +36,12 @@ class MainCoinBacktest:
 
     def evaluate(self, factors, raw_data, target_ret):
         # 1. 映射到 (-1, 1)
-        signal = torch.tanh(factors) 
+        # signal = torch.tanh(factors) 
+        signal = factors
 
         # 2. 建立多空头寸
-        position_long = (signal > 0.85).float() 
-        position_short = (signal < -0.85).float()
+        position_long = (signal > 2.0).float() 
+        position_short = (signal < -2.0).float()
         
         # 关键：空头应该是负权，代表方向
         position = position_long - position_short 
