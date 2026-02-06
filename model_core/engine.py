@@ -9,6 +9,7 @@ from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
 from .formula import JITFormulaCompiler
 from .backtest import MemeBacktest, MainCoinBacktest
+from .utils import check_tensor_nan
 
 class AlphaEngine:
     def __init__(self, data_path='./data/ETHUSDT-futures_1h_2020-01-01-2026-02-02.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
@@ -50,11 +51,13 @@ class AlphaEngine:
         self.bt = MainCoinBacktest()
         
         self.best_score = -float('inf')
+        self.best_corr = -float('inf')
         self.best_formula = None
         self.training_history = {
             'step': [],
             'avg_reward': [],
             'best_score': [],
+            'best_corr': [],
             'stable_rank': []
         }
 
@@ -87,13 +90,14 @@ class AlphaEngine:
 
                 stack_sizes = self.model.compute_stack_size(stack_sizes, action)        
             
-            seqs = torch.stack(tokens_list, dim=1)
+            seqs = torch.stack(tokens_list, dim=1)            
             
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
             
             legal_cnt = 0
+
             for i in range(bs):
-                formula = seqs[i].tolist()
+                formula = seqs[i].tolist()                
                 
                 # res = self.vm.execute(formula, self.loader.feat_tensor)
                 # 只需要编译一次
@@ -107,28 +111,37 @@ class AlphaEngine:
                 res = fast_factor_func(self.loader.feat_tensor)
                 
                 if res is None:
-                    print(formula)
                     rewards[i] = -5.0
                     continue
 
                 if res.std() < 1e-4:
                     rewards[i] = -10.0
-                    # print(formula)
-                    # print(res)
-                    # assert 0
                     continue
                 
-                legal_cnt += 1
+                legal_cnt += 1       
+
+                # if check_tensor_nan(res, f'res-{i}'):
+                #     print(f'formula: {formula}')
+                #     exprs = self.model.translate_to_exprs(formula)
+                #     print(f'exprs: ', exprs)           
 
                 # print('proper formulas generated...')
-                score, ret_val = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret)
-                rewards[i] = score
+                norm_type = self.compiler.get_op_name(formula[-1])
+                score, ret_val, corr = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret, norm_type)
+                rewards[i] = score + 100*corr
+
+                # check_tensor_nan(score, f'score-{i}')
                 
                 if score.item() > self.best_score:
                     self.best_score = score.item()
                     self.best_formula = formula
-                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula}")
+                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr}")
+
+                if corr > self.best_corr:
+                    self.best_corr = corr
+                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr}")
             
+            rewards = torch.nan_to_num(rewards, nan=-10.0)
             print(f'legal cnt/bs: {legal_cnt}/{bs}, legal ratio: {legal_cnt/bs}')
             # Normalize rewards
             adv = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
@@ -136,6 +149,8 @@ class AlphaEngine:
             loss = 0
             for t in range(len(log_probs)):
                 loss += -log_probs[t] * adv
+
+            check_tensor_nan(loss, 'loss')
             
             loss = loss.mean()
             

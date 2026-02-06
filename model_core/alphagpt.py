@@ -223,7 +223,7 @@ class AlphaGPT(nn.Module):
         super().__init__()
         self.d_model = 64
         # self.features_list = ['RET', 'VOL', 'V_CHG', 'PV', 'TREND']
-        self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL']
+        self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL', 'CONST_1', 'CONST_E', 'CONST_10', 'CONST_100']
         self.ops_list = [cfg[0] for cfg in OPS_CONFIG] 
         self.ops_norm_list = [cfg[0] for cfg in OPS_NORM_CONFIG]
         self.ops_arities = [cfg[2] for cfg in OPS_CONFIG] 
@@ -233,6 +233,7 @@ class AlphaGPT(nn.Module):
         
         self.vocab = self.features_list + self.ops_list + self.ops_norm_list
         self.vocab_size = len(self.vocab)
+        self.feat_offset = len(self.features_list)
         self.feat_ops_size = len(self.features_list + self.ops_list)
         self.ops_norm_size = len(self.ops_norm_list)
         
@@ -258,12 +259,123 @@ class AlphaGPT(nn.Module):
         self.head_critic = nn.Linear(self.d_model, 1)
 
         # self._build_valid_masks()
-
-        self.feat_offset = len(self.features_list)
+        
         self.max_len = ModelConfig.MAX_FORMULA_LEN
         self.max_stack = ModelConfig.MAX_FORMULA_LEN
         self.max_arity = max(self.ops_arities)
         self._precompute_valid_mask()
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.zeros_(module.bias)
+            nn.init.ones_(module.weight)
+
+    def translate_to_exprs(self, rpn_id_list):
+        """
+        高级中序转换器：支持优先级优化与金融语义映射
+        """
+        # 1. 金融语义映射
+        semantic_map = {
+            'CONST_1': '1', 'CONST_E': 'e', 'CONST_10': '10', 'CONST_100': '100',
+            'ADD': '+', 'SUB': '-', 'MUL': '*', 'DIV': '/'
+        }
+
+        # 2. 运算符优先级（仅用于中缀操作符）
+        precedence = {'+': 1, '-': 1, '*': 2, '/': 2}
+        
+        # 3. 左结合操作符（减法/除法需特殊处理）
+        left_associative = {'-', '/'}
+
+        stack = []  # (expression_string, current_precedence)
+        
+        if isinstance(rpn_id_list, torch.Tensor):
+            rpn_id_list = rpn_id_list.tolist()
+
+        for idx in rpn_id_list:
+            if idx < self.feat_offset:
+                # --- 处理特征/常量 ---
+                raw_symbol = self.features_list[idx]
+                symbol = semantic_map.get(raw_symbol, raw_symbol)
+                stack.append((symbol, 10))  # 原子优先级设为10（足够高）
+                
+            else:
+                # --- 处理操作符 ---
+                op_idx = idx - self.feat_offset
+                op_name = self.ops_all_list[op_idx]
+                symbol = semantic_map.get(op_name, op_name)
+                arity = self.ops_all_arities[op_idx]
+                
+                try:
+                    if arity == 1:
+                        arg_str, arg_prec = stack.pop()
+                        
+                        # 特殊处理负号（前缀操作符）
+                        if symbol == '-':
+                            # 负号优先级=3，高于+/-，低于*/
+                            current_prec = 3
+                            # 如果参数优先级 <= 负号，需要括号: -(a+b)
+                            expr = f"-({arg_str})" if arg_prec <= current_prec else f"-{arg_str}"
+                            stack.append((expr, current_prec))
+                        else:
+                            # 其他一元操作符：函数调用格式
+                            stack.append((f"{symbol}({arg_str})", 10))
+                    
+                    elif arity == 2:
+                        right_str, right_prec = stack.pop()
+                        left_str, left_prec = stack.pop()
+                        
+                        if symbol in precedence:
+                            current_prec = precedence[symbol]
+                            
+                            # 左操作数：如果优先级 < 当前，加括号
+                            l_out = f"({left_str})" if left_prec < current_prec else left_str
+                            
+                            # 右操作数：更复杂！
+                            # 情况1: 优先级 < 当前 → 必须加括号
+                            # 情况2: 优先级 == 当前 且 左结合 → 加括号（如 a - (b - c) 是错的，但 a - b - c 正确）
+                            if (right_prec < current_prec or 
+                                (right_prec == current_prec and symbol in left_associative)):
+                                r_out = f"({right_str})"
+                            else:
+                                r_out = right_str
+                            
+                            stack.append((f"{l_out} {symbol} {r_out}", current_prec))
+                        else:
+                            # 非中缀操作符（如 POW）→ 函数调用
+                            stack.append((f"{symbol}({left_str}, {right_str})", 10))
+                    
+                    elif arity == 3:
+                        # 三元操作符：如 GATE(condition, x, y)
+                        third_str, _ = stack.pop()  # y
+                        second_str, _ = stack.pop() # x  
+                        first_str, _ = stack.pop()  # condition
+                        stack.append((f"{symbol}({first_str}, {second_str}, {third_str})", 10))
+                    
+                    else:
+                        # 通用多参数处理（安全兜底）
+                        args = []
+                        for _ in range(arity):
+                            arg, _ = stack.pop()
+                            args.append(arg)
+                        args.reverse()  # RPN弹出顺序是反的
+                        stack.append((f"{symbol}({', '.join(args)})", 10))
+                        
+                except IndexError:
+                    return "Malformed RPN"
+
+        if len(stack) != 1:
+            return "Malformed RPN"
+        
+        result_str, _ = stack[0]
+        return result_str
 
     def _precompute_valid_mask(self):
         """
@@ -347,5 +459,16 @@ class AlphaGPT(nn.Module):
 
         batch_mask = self.valid_mask_3d[stack_sizes, r, :]
         masked_logits = logits.masked_fill(~batch_mask, -1e9)
-        
+
+        if torch.isnan(logits).any():
+            print('idx0: ', idx[0])
+            print(f'stack sizes: ', stack_sizes[0])
+            print('token 0 embed: ', self.token_emb.weight[0])
+            print('pos emb: ', self.token_emb.weight[0])
+            print('token embed: ', self.token_emb(idx)[0])
+            print('pos embed: ', self.pos_emb[:, :T, :][0])
+            print('last embs: ', last_emb)
+            print(logits)
+            assert 0
+
         return masked_logits, value, task_probs

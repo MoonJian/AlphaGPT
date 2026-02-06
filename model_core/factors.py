@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from .config import ModelConfig
+import math
 
 
 class RMSNormFactor(nn.Module):
@@ -192,7 +194,7 @@ class FeatureEngineer:
 
 
 class KlinesFeatureEngineer:
-    INPUT_DIM = 6
+    INPUT_DIM = 10
 
     @staticmethod
     def compute_features(raw_dict):
@@ -202,6 +204,11 @@ class KlinesFeatureEngineer:
         l = raw_dict['low']        
         v = raw_dict['volume']
         buy_v = raw_dict['taker_buy_volume']
+
+        const_1 = torch.full(c.shape, 1, dtype=torch.float32).to(c.device)
+        const_e = torch.full(c.shape, math.e, dtype=torch.float32).to(c.device)
+        const_10 = torch.full(c.shape, 10, dtype=torch.float32).to(c.device)
+        const_100 = torch.full(c.shape, 100, dtype=torch.float32).to(c.device)
         
         ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))        
         pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
@@ -212,7 +219,7 @@ class KlinesFeatureEngineer:
 
         # 替换原来的 robust_norm 函数
         @torch.jit.script
-        def robust_norm_rolling(x: torch.Tensor, window: int = 960) -> torch.Tensor:
+        def robust_norm_rolling(x: torch.Tensor, window: int = ModelConfig.OP_ROLL_WINDOW) -> torch.Tensor:
             """
             PyTorch版滚动Robust Normalization (针对 1D 或 2D Tensor)
             x: [T] 或 [B, T]
@@ -249,12 +256,17 @@ class KlinesFeatureEngineer:
             return res # 如果输入是1D，返回1D
 
         features = torch.stack([
-            robust_norm_rolling(ret),
+            # robust_norm_rolling(ret), # RET做rolling会损失信息
+            ret,
             pressure,
             robust_norm_rolling(fomo),
             robust_norm_rolling(dev),
             robust_norm_rolling(log_vol),
-            robust_norm_rolling(log_buy_vol)
+            robust_norm_rolling(log_buy_vol),
+            const_1,
+            const_e,
+            const_10,
+            const_100
         ], dim=1)
         
         return features

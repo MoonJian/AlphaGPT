@@ -34,14 +34,17 @@ class MainCoinBacktest:
         self.trade_size = 1000.0
         self.base_fee = 0.0005
 
-    def evaluate(self, factors, raw_data, target_ret):
-        # 1. 映射到 (-1, 1)
-        # signal = torch.tanh(factors) 
+    def evaluate(self, factors, raw_data, target_ret, norm_type='ZSCORE_ROLL'):
+        # 1. 把映射也当作一个OP
         signal = factors
 
         # 2. 建立多空头寸
-        position_long = (signal > 2.0).float() 
-        position_short = (signal < -2.0).float()
+        if norm_type == 'ZSCORE_ROLL':
+            position_long = (signal > 2.0).float() 
+            position_short = (signal < -2.0).float()
+        else:
+            position_long = (signal > 0.85).float() 
+            position_short = (signal < -0.85).float()            
         
         # 关键：空头应该是负权，代表方向
         position = position_long - position_short 
@@ -61,6 +64,11 @@ class MainCoinBacktest:
         # 4. 计算盈亏
         gross_pnl = position * target_ret
         net_pnl = gross_pnl - tx_cost
+
+        combined = torch.cat([factors, target_ret], dim=0)
+        # 计算相关系数矩阵
+        corr_matrix = torch.corrcoef(combined)
+        correlation = corr_matrix[0, 1].item()
         
         # 5. 评分系统优化
         cum_ret = net_pnl.sum(dim=1)
@@ -75,4 +83,4 @@ class MainCoinBacktest:
         score = torch.where(activity < 5, torch.tensor(-10.0, device=score.device), score)
         
         final_fitness = torch.median(score)
-        return final_fitness, cum_ret.mean().item()
+        return final_fitness, cum_ret.mean().item(), correlation

@@ -35,9 +35,12 @@ class JITFormulaCompiler:
             'DECAY': "_op_decay(x0)",
             'DELAY1': "_ts_delay(x0, 1)",
             'MAX3': "torch.max(x0, torch.max(_ts_delay(x0, 1), _ts_delay(x0, 2)))",
-            # 'TANH': "_op_tanh(x0)",
+            'TANH': "_op_tanh(x0)",
             'ZSCORE_ROLL': "_op_ts_zscore_rolling(x0)"
         }
+
+    def get_op_name(self, token):
+        return self.op_names[token-self.feat_offset]
 
     def compile(self, formula_tokens):
         stack = []

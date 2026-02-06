@@ -1,4 +1,5 @@
 import torch
+from .config import ModelConfig
 
 @torch.jit.script
 def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
@@ -19,7 +20,7 @@ def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch
 #     return torch.relu(z - 3.0)
 
 @torch.jit.script
-def _op_jump(x: torch.Tensor, window: int = 960) -> torch.Tensor:
+def _op_jump(x: torch.Tensor, window: int = ModelConfig.OP_ROLL_WINDOW) -> torch.Tensor:
     """
     x: [Batch, TimeSeries]
     window: 滚动的窗口大小
@@ -53,11 +54,11 @@ def _op_decay(x: torch.Tensor) -> torch.Tensor:
     return x + 0.8 * _ts_delay(x, 1) + 0.6 * _ts_delay(x, 2)
 
 @torch.jit.script
-def _op_tanh(x: torch.Tensor, window: int=960) -> torch.Tensor:
+def _op_tanh(x: torch.Tensor, window: int=ModelConfig.OP_ROLL_WINDOW) -> torch.Tensor:
     return torch.tanh(x)
 
 @torch.jit.script
-def _op_ts_zscore_rolling(x: torch.Tensor, window: int = 960) -> torch.Tensor:
+def _op_ts_zscore_rolling(x: torch.Tensor, window: int = ModelConfig.OP_ROLL_WINDOW) -> torch.Tensor:
     """
     x: [Batch, TimeSeries]
     window: 滚动的窗口大小
@@ -103,6 +104,6 @@ OPS_CONFIG = [
 ]
 
 OPS_NORM_CONFIG = [
-    # ('TANH', _op_tanh, 1),
+    ('TANH', _op_tanh, 1),
     ('ZSCORE_ROLL', _op_ts_zscore_rolling, 1)
 ]
