@@ -210,7 +210,7 @@ class KlinesFeatureEngineer:
         const_10 = torch.full(c.shape, 10, dtype=torch.float32).to(c.device)
         const_100 = torch.full(c.shape, 100, dtype=torch.float32).to(c.device)
         
-        ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))        
+        ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))       
         pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
         fomo = MemeIndicators.fomo_acceleration(v)
         dev = MemeIndicators.pump_deviation(c)

@@ -128,7 +128,7 @@ class AlphaEngine:
                 # print('proper formulas generated...')
                 norm_type = self.compiler.get_op_name(formula[-1])
                 score, ret_val, corr = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret, norm_type)
-                rewards[i] = score + 100*corr
+                rewards[i] = score + 200 * abs(corr)
 
                 # check_tensor_nan(score, f'score-{i}')
                 
@@ -137,8 +137,8 @@ class AlphaEngine:
                     self.best_formula = formula
                     tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr}")
 
-                if corr > self.best_corr:
-                    self.best_corr = corr
+                if abs(corr) > self.best_corr:
+                    self.best_corr = abs(corr)
                     tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr}")
             
             rewards = torch.nan_to_num(rewards, nan=-10.0)
