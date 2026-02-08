@@ -194,7 +194,7 @@ class FeatureEngineer:
 
 
 class KlinesFeatureEngineer:
-    INPUT_DIM = 10
+    INPUT_DIM = 16
 
     @staticmethod
     def compute_features(raw_dict):
@@ -210,12 +210,27 @@ class KlinesFeatureEngineer:
         const_10 = torch.full(c.shape, 10, dtype=torch.float32).to(c.device)
         const_100 = torch.full(c.shape, 100, dtype=torch.float32).to(c.device)
         
-        ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))       
+        ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))
         pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
         fomo = MemeIndicators.fomo_acceleration(v)
         dev = MemeIndicators.pump_deviation(c)
         log_vol = torch.log1p(v)
         log_buy_vol = torch.log1p(buy_v)
+
+        # Advanced factors
+        # 按照默认的周期计算
+        vol_cluster = MemeIndicators.volatility_clustering(c)
+        momentum_rev = MemeIndicators.momentum_reversal(c)
+        rel_strength = MemeIndicators.relative_strength(c, h, l)
+
+        # High-low range
+        hl_range = (h - l) / (c + 1e-9)        
+        # Close position in range
+        close_pos = (c - l) / (h - l + 1e-9)
+        
+        # Volume trend
+        vol_prev = torch.roll(v, 1, dims=1)
+        vol_trend = (v - vol_prev) / (vol_prev + 1.0)
 
         # 替换原来的 robust_norm 函数
         @torch.jit.script
@@ -263,6 +278,12 @@ class KlinesFeatureEngineer:
             robust_norm_rolling(dev),
             robust_norm_rolling(log_vol),
             robust_norm_rolling(log_buy_vol),
+            robust_norm_rolling(vol_cluster),
+            momentum_rev,
+            robust_norm_rolling(rel_strength),
+            robust_norm_rolling(hl_range),
+            close_pos,
+            robust_norm_rolling(vol_trend),          
             const_1,
             const_e,
             const_10,

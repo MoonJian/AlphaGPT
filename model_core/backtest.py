@@ -34,6 +34,60 @@ class MainCoinBacktest:
         self.trade_size = 1000.0
         self.base_fee = 0.0005
 
+    def _calc_purified_ic(self, factor_raw, future_returns, market_returns=None, method='pearson'):
+        """
+        计算剔除了市场 Beta 影响后的纯净 IC
+        
+        Args:
+            factor_raw: [B, T] or [T], 你的原始因子
+            future_returns: [B, T] or [T], 未来收益率 (Label)
+            market_returns: [B, T] or [T], 市场基准收益率 (用于剔除 Beta)
+            method: 'pearson' or 'rank' (Spearman)
+        """
+        # 1. 预处理：确保无 NaN
+        mask = ~torch.isnan(factor_raw) & ~torch.isnan(future_returns)
+        if market_returns is not None:
+            mask &= ~torch.isnan(market_returns)
+            
+        f = factor_raw[mask].float()
+        r = future_returns[mask].float()
+        
+        # 2. 正交化：剔除市场 Beta (如果有基准)
+        # 也就是计算：Returns 对 Market 的回归残差
+        # 或者是：Factor 对 Market 的回归残差 (通常对 Factor 做正交化更稳健)
+        if market_returns is not None:
+            m = market_returns[mask].float()
+            
+            # 线性回归: F = beta * M + alpha
+            # beta = Cov(F, M) / Var(M)
+            # 简单的一元回归写法:
+            m_centered = m - m.mean()
+            f_centered = f - f.mean()
+            
+            beta = (m_centered * f_centered).sum() / (m_centered ** 2).sum()
+            f_residual = f - beta * m
+            
+            # 使用这一步处理后的因子替代原始因子
+            f = f_residual
+
+        # 3. 计算 IC
+        if method == 'rank':
+            # PyTorch 的 argsort 两次可以得到 rank
+            f_rank = f.argsort().argsort().float()
+            r_rank = r.argsort().argsort().float()
+            
+            # 归一化 rank 到 [0, 1] 或 Z-score 也可以，直接算 Pearson 即可等价于 Spearman
+            f = f_rank
+            r = r_rank
+
+        # 计算 Pearson Correlation
+        vx = f - torch.mean(f)
+        vy = r - torch.mean(r)
+        
+        ic = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)))
+        
+        return ic
+
     def evaluate(self, factors, raw_data, target_ret, norm_type='ZSCORE_ROLL'):
         # 1. 把映射也当作一个OP
         signal = factors
@@ -69,6 +123,9 @@ class MainCoinBacktest:
         # 计算相关系数矩阵
         corr_matrix = torch.corrcoef(combined)
         correlation = corr_matrix[0, 1].item()
+
+        # 计算纯净 IC
+        # correlation = self._calc_purified_ic(factors, target_ret, market_returns=target_ret).item()
         
         # 5. 评分系统优化
         cum_ret = net_pnl.sum(dim=1)
@@ -80,7 +137,7 @@ class MainCoinBacktest:
         
         score = cum_ret - (big_drawdowns * 2.0)
         # 惩罚不活跃的公式
-        score = torch.where(activity < 5, torch.tensor(-10.0, device=score.device), score)
+        score = torch.where(activity < 100, torch.tensor(-10.0, device=score.device), score)
         
         final_fitness = torch.median(score)
         return final_fitness, cum_ret.mean().item(), correlation

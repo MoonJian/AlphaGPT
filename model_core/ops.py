@@ -101,9 +101,31 @@ def _op_ts_zscore_rolling(x: torch.Tensor, window: int = ModelConfig.OP_ROLL_WIN
     
     return res
 
+@torch.jit.script
+def _op_rolling_mean(x: torch.Tensor, window: int = ModelConfig.OP_ROLL_WINDOW) -> torch.Tensor:
+    """
+    x: [Batch, TimeSeries]
+    window: 滚动的窗口大小
+    """
+    B, T = x.size()
+    
+    # 1. 对序列进行填充，保证输出长度与输入一致 (Causal Padding)
+    # 在左侧填充 window-1 个值，这样第一个窗口的末尾正好对齐序列的第一个元素
+    x_padded = torch.nn.functional.pad(x, (window - 1, 0), mode='constant', value=0.0)
+    
+    # 2. 创建滑动窗口 [B, T, window]
+    # 使用 .contiguous() 预防你之前遇到的 CUDA illegal memory access
+    windows = x_padded.contiguous().unfold(1, window, 1)
+    
+    # 3. 在窗口维度（最后一个维度）计算均值和标准差
+    # 注意：这些指标只包含当前时刻及之前的信息
+    rolling_mean = windows.mean(dim=-1)
+    
+    return rolling_mean
+
 
 OPS_CONFIG = [
-    # ('INDENTIFY', lambda x: x, 1),
+    ('INDENTIFY', lambda x: x, 1),
     ('ADD', lambda x, y: x + y, 2),
     ('SUB', lambda x, y: x - y, 2),
     ('MUL', lambda x, y: x * y, 2),
@@ -115,7 +137,10 @@ OPS_CONFIG = [
     ('JUMP', _op_jump, 1),
     ('DECAY', _op_decay, 1),
     ('DELAY1', lambda x: _ts_delay(x, 1), 1),
-    ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1)
+    ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1),
+    ('ROLL_MEAN_3', lambda x: _op_rolling_mean(x, 3), 1),
+    ('ROLL_MEAN_5', lambda x: _op_rolling_mean(x, 5), 1),
+    ('ROLL_MEAN_15', lambda x: _op_rolling_mean(x, 15), 1)
 ]
 
 OPS_NORM_CONFIG = [

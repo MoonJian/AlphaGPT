@@ -2,6 +2,7 @@ import torch
 from torch.distributions import Categorical
 from tqdm import tqdm
 import json
+import numpy as np
 
 from .config import ModelConfig
 from .data_loader import CryptoDataLoader
@@ -10,6 +11,14 @@ from .vm import StackVM
 from .formula import JITFormulaCompiler
 from .backtest import MemeBacktest, MainCoinBacktest
 from .utils import check_tensor_nan
+
+from torch.utils.tensorboard import SummaryWriter
+import os
+from datetime import datetime
+
+# 建议使用带时间戳的路径，避免多次实验的数据混在一起
+log_dir = os.path.join("logs", datetime.now().strftime("%Y%m%d-%H%M%S"))
+writer = SummaryWriter(log_dir=log_dir)
 
 class AlphaEngine:
     def __init__(self, data_path='./data/ETHUSDT-futures_1h_2020-01-01-2026-02-02.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
@@ -96,6 +105,7 @@ class AlphaEngine:
             
             legal_cnt = 0
 
+            score_list, corr_list = [], []
             for i in range(bs):
                 formula = seqs[i].tolist()                
                 
@@ -116,19 +126,22 @@ class AlphaEngine:
 
                 if res.std() < 1e-4:
                     rewards[i] = -10.0
+                    continue                                       
+
+                if check_tensor_nan(res, f'res-{i}'):
+                    # print(f'formula: {formula}')
+                    # exprs = self.model.translate_to_exprs(formula)
+                    # print(f'exprs: ', exprs) 
+                    rewards[i] = -5.0
                     continue
-                
-                legal_cnt += 1       
 
-                # if check_tensor_nan(res, f'res-{i}'):
-                #     print(f'formula: {formula}')
-                #     exprs = self.model.translate_to_exprs(formula)
-                #     print(f'exprs: ', exprs)           
-
+                legal_cnt += 1
                 # print('proper formulas generated...')
                 norm_type = self.compiler.get_op_name(formula[-1])
                 score, ret_val, corr = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret, norm_type)
-                rewards[i] = score + 200 * abs(corr)
+                score_list.append(score.item())
+                corr_list.append(corr)
+                rewards[i] = score + 10 * abs(corr)
 
                 # check_tensor_nan(score, f'score-{i}')
                 
@@ -139,9 +152,9 @@ class AlphaEngine:
 
                 if abs(corr) > self.best_corr:
                     self.best_corr = abs(corr)
-                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr}")
+                    tqdm.write(f"[!] New Corr King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr}")
             
-            rewards = torch.nan_to_num(rewards, nan=-10.0)
+            rewards = torch.nan_to_num(rewards, nan=-5.0)
             print(f'legal cnt/bs: {legal_cnt}/{bs}, legal ratio: {legal_cnt/bs}')
             # Normalize rewards
             adv = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
@@ -157,6 +170,13 @@ class AlphaEngine:
             # Gradient step
             self.opt.zero_grad()
             loss.backward()
+
+            parameters = [p for p in self.model.parameters() if p.grad is not None]
+            total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in parameters]), 2)
+
+            # 3. 记录到 TensorBoard
+            writer.add_scalar('Train/grad_norm', total_norm.item(), step)
+
             self.opt.step()
             
             # Apply Low-Rank Decay regularization
@@ -165,7 +185,7 @@ class AlphaEngine:
             
             # Logging
             avg_reward = rewards.mean().item()
-            postfix_dict = {'AvgRew': f"{avg_reward:.3f}", 'BestScore': f"{self.best_score:.3f}"}
+            postfix_dict = {'AvgRew': f"{avg_reward:.3f}", 'BestScore': f"{self.best_score:.3f}", 'BestCorr': f"{self.best_corr}"}
             
             if self.use_lord and step % 100 == 0:
                 stable_rank = self.rank_monitor.compute()
@@ -177,6 +197,14 @@ class AlphaEngine:
             self.training_history['best_score'].append(self.best_score)
             
             pbar.set_postfix(postfix_dict)
+
+            writer.add_scalar('Train/loss', loss.item(), step)
+            writer.add_scalar('Train/avg_reward', avg_reward, step)
+            writer.add_scalar('Train/best_score', self.best_score, step)
+            writer.add_scalar('Train/score', np.mean(score_list), step)
+            writer.add_scalar('Train/corr', np.mean(corr_list), step)
+            writer.add_text('Train/best_formula', str(self.best_formula), step)
+            writer.add_text('Train/best_formula_exprs', self.model.translate_to_exprs(self.best_formula), step)
 
         # Save best formula
         with open("best_meme_strategy.json", "w") as f:
@@ -190,6 +218,8 @@ class AlphaEngine:
         print(f"\n✓ Training completed!")
         print(f"  Best score: {self.best_score:.4f}")
         print(f"  Best formula: {self.best_formula}")
+
+        writer.close()
 
 
 if __name__ == "__main__":

@@ -38,13 +38,15 @@ class AlphaEngine:
 
         fast_factor_func = self.compiler.compile(formula)
         res = fast_factor_func(self.loader.feat_tensor)
+        print(f'res max: {res.max()}, min: {res.min()}')
         norm_type = self.compiler.get_op_name(formula[-1])
         score, ret_val, corr = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret, norm_type)
         print(score, ret_val, corr)
 
 if __name__ == "__main__":
     eng = AlphaEngine(use_lord_regularization=True)
-    exprs = eng.decode([0, 19, 18, 20, 0, 6, 15, 21, 12, 0, 12, 12, 22])
+    tokens = [0, 0, 25, 4, 13, 27, 1, 23, 18, 26, 18, 21, 28]
+    exprs = eng.decode(tokens)
     print(exprs)
 
-    eng.backtest([0, 19, 18, 20, 0, 6, 15, 21, 12, 0, 12, 12, 22])
+    eng.backtest(tokens)

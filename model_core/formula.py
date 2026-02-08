@@ -1,5 +1,5 @@
 import torch
-from .ops import _op_gate, _op_jump, _op_decay, _ts_delay, _op_tanh, _op_ts_zscore_rolling, OPS_CONFIG, OPS_NORM_CONFIG
+from .ops import _op_gate, _op_jump, _op_decay, _ts_delay, _op_tanh, _op_ts_zscore_rolling, _op_rolling_mean, OPS_CONFIG, OPS_NORM_CONFIG
 from .factors import FeatureEngineer, KlinesFeatureEngineer
 
 class JITFormulaCompiler:
@@ -17,12 +17,13 @@ class JITFormulaCompiler:
             '_op_decay': _op_decay,
             '_ts_delay': _ts_delay,
             '_op_tanh': _op_tanh,
-            '_op_ts_zscore_rolling': _op_ts_zscore_rolling
+            '_op_ts_zscore_rolling': _op_ts_zscore_rolling,
+            '_op_rolling_mean': _op_rolling_mean
         }
         
         # 将 OPS_CONFIG 中的 lambda 和函数映射到字符串表达式
         self.op_to_str = {
-            # 'INDENTIFY': "x0",
+            'INDENTIFY': "x0",
             'ADD': "(x0 + x1)",
             'SUB': "(x0 - x1)",
             'MUL': "(x0 * x1)",
@@ -35,6 +36,9 @@ class JITFormulaCompiler:
             'DECAY': "_op_decay(x0)",
             'DELAY1': "_ts_delay(x0, 1)",
             'MAX3': "torch.max(x0, torch.max(_ts_delay(x0, 1), _ts_delay(x0, 2)))",
+            'ROLL_MEAN_3': "_op_rolling_mean(x0, 3)",
+            'ROLL_MEAN_5': "_op_rolling_mean(x0, 5)",
+            'ROLL_MEAN_15': "_op_rolling_mean(x0, 15)",
             'TANH': "_op_tanh(x0)",
             'ZSCORE_ROLL': "_op_ts_zscore_rolling(x0)"
         }

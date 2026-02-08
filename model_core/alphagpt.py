@@ -223,7 +223,7 @@ class AlphaGPT(nn.Module):
         super().__init__()
         self.d_model = 64
         # self.features_list = ['RET', 'VOL', 'V_CHG', 'PV', 'TREND']
-        self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL', 'CONST_1', 'CONST_E', 'CONST_10', 'CONST_100']
+        self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL', 'VOL_CLUSTER', 'MOM_REV', 'REL_STRENGTH', 'HL_RANGE', 'CLOSE_POS', 'VOL_TREND', 'CONST_1', 'CONST_E', 'CONST_10', 'CONST_100']
         self.ops_list = [cfg[0] for cfg in OPS_CONFIG] 
         self.ops_norm_list = [cfg[0] for cfg in OPS_NORM_CONFIG]
         self.ops_arities = [cfg[2] for cfg in OPS_CONFIG] 
