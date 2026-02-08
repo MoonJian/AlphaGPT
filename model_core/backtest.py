@@ -30,9 +30,45 @@ class MemeBacktest:
     
 
 class MainCoinBacktest:
-    def __init__(self):
-        self.trade_size = 1000.0
-        self.base_fee = 0.0005
+    """
+    ETH/主流币 1h 频率回测。阈值与交易次数相关参数已针对 1h 数据做了默认优化。
+    """
+    def __init__(
+        self,
+        trade_size=1000.0,
+        base_fee=0.0005,
+        impact_slippage=0.0001,
+        # Z-score 下多空阈值：2.0 很保守、交易少；1.5~1.75 更适配 1h 提高交易次数
+        zscore_long=1.5,
+        zscore_short=-1.5,
+        # 非 Z-score 时多空阈值（假设因子约在 [-1, 1]）
+        quantile_long=0.85,
+        quantile_short=-0.85,
+        # 最少“在仓” bar 数，用于连续惩罚的参考线
+        min_activity_bars=80,
+        # 最少换手次数（发生仓位变化的 bar 数），用于连续惩罚的参考线
+        min_trades=50,
+        # 活跃度不足时的连续惩罚系数（惩罚 = scale * relu(min_activity - activity)）
+        activity_penalty_scale=0.02,
+        # 交易次数不足时的连续惩罚系数（惩罚 = scale * relu(min_trades - trade_count)）
+        trade_penalty_scale=0.02,
+        # 单 bar 净亏损超过该比例算一次“大回撤”，计入惩罚
+        big_drawdown_threshold=-0.01,
+        big_drawdown_penalty=2.0,
+    ):
+        self.trade_size = trade_size
+        self.base_fee = base_fee
+        self.impact_slippage = impact_slippage
+        self.zscore_long = zscore_long
+        self.zscore_short = zscore_short
+        self.quantile_long = quantile_long
+        self.quantile_short = quantile_short
+        self.min_activity_bars = min_activity_bars
+        self.min_trades = min_trades
+        self.activity_penalty_scale = activity_penalty_scale
+        self.trade_penalty_scale = trade_penalty_scale
+        self.big_drawdown_threshold = big_drawdown_threshold
+        self.big_drawdown_penalty = big_drawdown_penalty
 
     def _calc_purified_ic(self, factor_raw, future_returns, market_returns=None, method='pearson'):
         """
@@ -92,52 +128,64 @@ class MainCoinBacktest:
         # 1. 把映射也当作一个OP
         signal = factors
 
-        # 2. 建立多空头寸
+        # 2. 建立多空头寸（阈值可配置，适配 1h 提高交易次数）
         if norm_type == 'ZSCORE_ROLL':
-            position_long = (signal > 2.0).float() 
-            position_short = (signal < -2.0).float()
+            position_long = (signal > self.zscore_long).float()
+            position_short = (signal < self.zscore_short).float()
         else:
-            position_long = (signal > 0.85).float() 
-            position_short = (signal < -0.85).float()            
+            position_long = (signal > self.quantile_long).float()
+            position_short = (signal < self.quantile_short).float()            
         
         # 关键：空头应该是负权，代表方向
         position = position_long - position_short 
         
         # 3. 计算交易成本
-        impact_slippage = 0.0001
-        total_slippage_one_way = self.base_fee + impact_slippage
+        total_slippage_one_way = self.base_fee + self.impact_slippage
         
-        # 计算换手率：使用差分更安全
-        # 假设 position 形状是 [B, T]
+        # 计算换手率与交易次数：使用差分
+        # position 形状 [B, T]
         prev_pos = torch.zeros_like(position)
-        prev_pos[:, 1:] = position[:, :-1] 
-        
+        prev_pos[:, 1:] = position[:, :-1]
+
         turnover = torch.abs(position - prev_pos)
         tx_cost = turnover * total_slippage_one_way
+        # 交易次数：发生仓位变化的 bar 数（用于连续惩罚）
+        trade_count = (position != prev_pos).float().sum(dim=1)
         
         # 4. 计算盈亏
         gross_pnl = position * target_ret
         net_pnl = gross_pnl - tx_cost
 
         combined = torch.cat([factors, target_ret], dim=0)
-        # 计算相关系数矩阵
+        # 计算相关系数矩阵（因子与收益）；方差为 0 时 corrcoef 会出 nan，兜底为 0）
         corr_matrix = torch.corrcoef(combined)
-        correlation = corr_matrix[0, 1].item()
+        correlation = torch.nan_to_num(corr_matrix[0, 1], nan=0.0).item()
 
         # 计算纯净 IC
         # correlation = self._calc_purified_ic(factors, target_ret, market_returns=target_ret).item()
         
-        # 5. 评分系统优化
+        # 5. 评分：收益 - 大回撤惩罚 - 活跃度/交易次数不足的连续惩罚（利于 RL 训练）
         cum_ret = net_pnl.sum(dim=1)
-        # 这里的 -0.05 很大，如果是 15min 频率，建议关注更小的回撤
-        big_drawdowns = (net_pnl < -0.01).float().sum(dim=1) 
-        
-        # 加上活跃度惩罚：防止模型通过“不交易”来保命
-        activity = torch.abs(position).sum(dim=1)
-        
-        score = cum_ret - (big_drawdowns * 2.0)
-        # 惩罚不活跃的公式
-        score = torch.where(activity < 100, torch.tensor(-10.0, device=score.device), score)
-        
+        big_drawdowns = (net_pnl < self.big_drawdown_threshold).float().sum(dim=1)
+        activity = torch.abs(position).sum(dim=1)  # 在仓 bar 数
+
+        # 连续惩罚：交易次数/活跃度越少惩罚越大，无阶跃，便于梯度传播
+        T = position.shape[1]
+        min_activity = min(self.min_activity_bars, T // 50)
+        min_trades = min(self.min_trades, T // 100)
+        activity_penalty = self.activity_penalty_scale * torch.relu(
+            min_activity - activity
+        )
+        trade_penalty = self.trade_penalty_scale * torch.relu(
+            min_trades - trade_count
+        )
+
+        score = (
+            cum_ret
+            - big_drawdowns * self.big_drawdown_penalty
+            - activity_penalty
+            - trade_penalty
+        )
+
         final_fitness = torch.median(score)
-        return final_fitness, cum_ret.mean().item(), correlation
+        return final_fitness, cum_ret.mean().item(), correlation, trade_count.mean().item()

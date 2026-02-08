@@ -40,8 +40,8 @@ class AlphaEngine:
         res = fast_factor_func(self.loader.feat_tensor)
         print(f'res max: {res.max()}, min: {res.min()}')
         norm_type = self.compiler.get_op_name(formula[-1])
-        score, ret_val, corr = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret, norm_type)
-        print(score, ret_val, corr)
+        score, ret_val, corr, trade_count = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret, norm_type)
+        print(score, ret_val, corr, trade_count)
 
 if __name__ == "__main__":
     eng = AlphaEngine(use_lord_regularization=True)

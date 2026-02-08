@@ -154,13 +154,15 @@ class MTPHead(nn.Module):
         # Route to appropriate task heads
         task_logits = self.task_router(x)
         task_probs = F.softmax(task_logits, dim=-1)
-        
         # Compute all task outputs
         task_outputs = [head(x) for head in self.task_heads]
-        task_outputs = torch.stack(task_outputs, dim=1)  # [B, num_tasks, vocab_size]
-        
-        # Weighted combination
-        weighted = (task_probs.unsqueeze(-1) * task_outputs).sum(dim=1)
+        task_outputs = torch.stack(task_outputs, dim=1)  # [B, num_tasks, V] or [B, num_tasks, T, V]
+        if x.dim() == 2:
+            weighted = (task_probs.unsqueeze(-1) * task_outputs).sum(dim=1)
+        else:
+            # x: [B, T, D] -> task_probs [B, T, num_tasks], task_outputs [B, num_tasks, T, V]
+            task_outputs = task_outputs.permute(0, 2, 1, 3)  # [B, T, num_tasks, V]
+            weighted = (task_probs.unsqueeze(-1) * task_outputs).sum(dim=2)  # [B, T, V]
         return weighted, task_probs
 
 
@@ -239,7 +241,8 @@ class AlphaGPT(nn.Module):
         
         # Embedding
         self.token_emb = nn.Embedding(self.vocab_size, self.d_model)
-        self.pos_emb = nn.Parameter(torch.zeros(1, ModelConfig.MAX_FORMULA_LEN + 1, self.d_model))
+        # BOS + L 个动作 = MAX_FORMULA_LEN+2 个 token，需至少 14 个位置
+        self.pos_emb = nn.Parameter(torch.zeros(1, ModelConfig.MAX_FORMULA_LEN + 2, self.d_model))
         
         # Enhanced Transformer with Looped Transformer
         self.blocks = LoopedTransformer(
@@ -464,7 +467,7 @@ class AlphaGPT(nn.Module):
             print('idx0: ', idx[0])
             print(f'stack sizes: ', stack_sizes[0])
             print('token 0 embed: ', self.token_emb.weight[0])
-            print('pos emb: ', self.token_emb.weight[0])
+            print('pos emb: ', self.pos_emb.weight[0])
             print('token embed: ', self.token_emb(idx)[0])
             print('pos embed: ', self.pos_emb[:, :T, :][0])
             print('last embs: ', last_emb)
@@ -472,3 +475,39 @@ class AlphaGPT(nn.Module):
             assert 0
 
         return masked_logits, value, task_probs
+
+    def forward_sequence(self, full_idx):
+        """
+        对完整序列做一次前向，返回每个位置的 logits 和 value，用于 PPO 的 policy/value 更新。
+        full_idx: [B, L+1]，第一列为 BOS(0)，后 L 列为动作序列。
+        返回:
+            masked_logits: [B, L, vocab_size]  (L 个预测位置)
+            values: [B, L]
+        """
+        B, T_full = full_idx.size()
+        L = T_full - 1  # 动作数，只对前 L 个位置输出 logits/value
+
+        # 按前缀计算每步的 stack_sizes（位置 t 时已执行 actions 1..t）
+        stack_sizes_list = []
+        stack_sizes = torch.zeros(B, dtype=torch.long, device=full_idx.device)
+        stack_sizes_list.append(stack_sizes.clone())
+        for t in range(1, T_full):
+            stack_sizes = self.compute_stack_size(stack_sizes, full_idx[:, t])
+            stack_sizes_list.append(stack_sizes.clone())
+
+        x = self.token_emb(full_idx) + self.pos_emb[:, :T_full, :]
+        mask = nn.Transformer.generate_square_subsequent_mask(T_full).to(full_idx.device)
+        x = self.blocks(x, mask=mask, is_causal=True)
+        x = self.ln_f(x)
+
+        logits_all, _ = self.mtp_head(x)   # [B, T_full, vocab_size]
+        values_all = self.head_critic(x).squeeze(-1)  # [B, T_full]
+
+        # 只对前 L 个位置施加合法 token mask（对应 L 个动作）
+        masked_logits = logits_all[:, :L, :].clone()
+        for t in range(L):
+            r = self.max_len - t
+            batch_mask = self.valid_mask_3d[stack_sizes_list[t], r, :]
+            masked_logits[:, t, :] = masked_logits[:, t, :].masked_fill(~batch_mask, -1e9)
+
+        return masked_logits, values_all[:, :L]
