@@ -62,6 +62,7 @@ class AlphaEngine:
         
         self.best_score = -float('inf')
         self.best_corr = -float('inf')
+        self.best_threshold = None
         self.best_formula = None
         self.training_history = {
             'step': [],
@@ -103,7 +104,7 @@ class AlphaEngine:
             seqs = torch.stack(tokens_list, dim=1)  # [B, L]
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
             legal_cnt = 0
-            score_list, corr_list, trade_count_list = [], [], []
+            score_list, corr_list, trade_count_list, threshold_list = [], [], [], []
 
             for i in range(bs):
                 formula = seqs[i].tolist()
@@ -124,12 +125,13 @@ class AlphaEngine:
 
                 legal_cnt += 1
                 norm_type = self.compiler.get_op_name(formula[-1])
-                score, ret_val, corr, trade_count = self.bt.evaluate(
+                score, ret_val, corr, trade_count, best_threshold = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret, norm_type
                 )
                 score_list.append(score.item())
                 corr_list.append(corr)
                 trade_count_list.append(trade_count)
+                threshold_list.append(best_threshold)
                 rewards[i] = (
                     ModelConfig.REWARD_SCORE_WEIGHT * score.item()
                     + ModelConfig.REWARD_CORR_WEIGHT * abs(corr)
@@ -138,10 +140,11 @@ class AlphaEngine:
                 if score.item() > self.best_score:
                     self.best_score = score.item()
                     self.best_formula = formula
-                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count}")
+                    self.best_threshold = best_threshold
+                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count} | Threshold {best_threshold}")
                 if abs(corr) > self.best_corr:
                     self.best_corr = abs(corr)
-                    tqdm.write(f"[!] New Corr King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count}")
+                    tqdm.write(f"[!] New Corr King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count} | Threshold {best_threshold}")
 
             rewards = torch.nan_to_num(rewards, nan=-5.0)
 
@@ -192,7 +195,7 @@ class AlphaEngine:
             if legal_cnt > 0:
                 print(f'legal cnt/bs: {legal_cnt}/{bs}, legal ratio: {legal_cnt/bs:.4f}')
             avg_reward = rewards.mean().item()
-            postfix_dict = {'AvgRew': f"{avg_reward:.3f}", 'BestScore': f"{self.best_score:.3f}", 'BestCorr': f"{self.best_corr:.4f}"}
+            postfix_dict = {'AvgRew': f"{avg_reward:.3f}", 'BestScore': f"{self.best_score:.3f}", 'BestCorr': f"{self.best_corr:.4f}", 'BestThreshold': f"{self.best_threshold}"}
             if self.use_lord and step % 100 == 0:
                 stable_rank = self.rank_monitor.compute()
                 postfix_dict['Rank'] = f"{stable_rank:.2f}"
@@ -214,6 +217,7 @@ class AlphaEngine:
                 writer.add_scalar('Train/trade_count', np.mean(trade_count_list), step)
             writer.add_text('Train/best_formula', str(self.best_formula), step)
             writer.add_text('Train/best_formula_exprs', self.model.translate_to_exprs(self.best_formula), step)
+            writer.add_text('Train/best_threshold', str(self.best_threshold), step)
 
         # Save best formula
         with open("best_meme_strategy.json", "w") as f:

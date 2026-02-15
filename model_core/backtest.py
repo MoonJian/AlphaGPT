@@ -1,4 +1,5 @@
 import torch
+import math
 
 class MemeBacktest:
     def __init__(self):
@@ -53,7 +54,7 @@ class MainCoinBacktest:
         # 交易次数不足时的连续惩罚系数（惩罚 = scale * relu(min_trades - trade_count)）
         trade_penalty_scale=0.02,
         # 单 bar 净亏损超过该比例算一次“大回撤”，计入惩罚
-        big_drawdown_threshold=-0.01,
+        big_drawdown_threshold=-0.02,
         big_drawdown_penalty=2.0,
     ):
         self.trade_size = trade_size
@@ -124,17 +125,14 @@ class MainCoinBacktest:
         
         return ic
 
-    def evaluate(self, factors, raw_data, target_ret, norm_type='ZSCORE_ROLL'):
-        # 1. 把映射也当作一个OP
-        signal = factors
-
+    def _evaluate_single(self, signal, target_ret, norm_type='ZSCORE_ROLL', threshold=(0.85, -0.85)):
         # 2. 建立多空头寸（阈值可配置，适配 1h 提高交易次数）
         if norm_type == 'ZSCORE_ROLL':
-            position_long = (signal > self.zscore_long).float()
-            position_short = (signal < self.zscore_short).float()
+            position_long = (signal > threshold[0]).float()
+            position_short = (signal < threshold[1]).float()
         else:
-            position_long = (signal > self.quantile_long).float()
-            position_short = (signal < self.quantile_short).float()            
+            position_long = (signal > threshold[0]).float()
+            position_short = (signal < threshold[1]).float()            
         
         # 关键：空头应该是负权，代表方向
         position = position_long - position_short 
@@ -155,24 +153,22 @@ class MainCoinBacktest:
         # 4. 计算盈亏
         gross_pnl = position * target_ret
         net_pnl = gross_pnl - tx_cost
-
-        combined = torch.cat([factors, target_ret], dim=0)
-        # 计算相关系数矩阵（因子与收益）；方差为 0 时 corrcoef 会出 nan，兜底为 0）
-        corr_matrix = torch.corrcoef(combined)
-        correlation = torch.nan_to_num(corr_matrix[0, 1], nan=0.0).item()
-
-        # 计算纯净 IC
-        # correlation = self._calc_purified_ic(factors, target_ret, market_returns=target_ret).item()
         
         # 5. 评分：收益 - 大回撤惩罚 - 活跃度/交易次数不足的连续惩罚（利于 RL 训练）
         cum_ret = net_pnl.sum(dim=1)
+
+        # 夏普比率 (年化，假设 T 为小时线：24*365)
+        mean_ret = net_pnl.mean(dim=1)
+        std_ret = net_pnl.std(dim=1) + 1e-8
+        sharpe = mean_ret / std_ret * math.sqrt(24 * 365)
+
         big_drawdowns = (net_pnl < self.big_drawdown_threshold).float().sum(dim=1)
         activity = torch.abs(position).sum(dim=1)  # 在仓 bar 数
 
-        # 连续惩罚：交易次数/活跃度越少惩罚越大，无阶跃，便于梯度传播
+        # 连续惩罚：交易次数/活跃度越少惩罚越大，无阶跃，便于梯度传播；短序列时放宽
         T = position.shape[1]
-        min_activity = min(self.min_activity_bars, T // 50)
-        min_trades = min(self.min_trades, T // 100)
+        min_activity = min(self.min_activity_bars, T // 10)
+        min_trades = min(self.min_trades, T // 20)
         activity_penalty = self.activity_penalty_scale * torch.relu(
             min_activity - activity
         )
@@ -181,11 +177,35 @@ class MainCoinBacktest:
         )
 
         score = (
-            cum_ret
+            sharpe
             - big_drawdowns * self.big_drawdown_penalty
             - activity_penalty
             - trade_penalty
         )
 
-        final_fitness = torch.median(score)
-        return final_fitness, cum_ret.mean().item(), correlation, trade_count.mean().item()
+        return score.mean(), cum_ret.mean().item(), trade_count.mean().item()        
+
+    def evaluate(self, factors, raw_data, target_ret, norm_type='ZSCORE_ROLL'):
+        # 1. 把映射也当作一个OP
+        signal = factors
+
+        combined = torch.cat([factors, target_ret], dim=0)
+        # 计算相关系数矩阵（因子与收益）；最后一行是 target，取首行与 target 的相关系数
+        corr_matrix = torch.corrcoef(combined)
+        correlation = torch.nan_to_num(corr_matrix[0, -1], nan=0.0)
+
+        best_threshold = None
+        best_score = -float('inf')
+        if norm_type == 'ZSCORE_ROLL':
+            threshold_list = [(1.0, -1.0), (1.5, -1.5), (2.0, -2.0)]
+        else:
+            threshold_list = [(0.1, -0.1), (0.5, -0.5), (0.85, -0.85)]
+        
+        for threshold in threshold_list:
+            score, ret_val, trade_count = self._evaluate_single(signal, target_ret, norm_type, threshold)
+            if score.item() > best_score:
+                best_score = score
+                best_ret_val = ret_val
+                best_trade_count = trade_count
+                best_threshold = threshold
+        return best_score, best_ret_val, correlation.item(), best_trade_count, best_threshold
