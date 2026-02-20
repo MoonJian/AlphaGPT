@@ -60,3 +60,6 @@ Thumbs.db
 # tmp data
 *.parquet
 *.log
+
+README_*
+tushare*
