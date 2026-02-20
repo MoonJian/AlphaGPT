@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .config import ModelConfig
 from .ops import OPS_CONFIG, OPS_NORM_CONFIG
+from .factors import FuturesFactorEngineer
 
 
 class NewtonSchulzLowRankDecay:
@@ -224,8 +225,8 @@ class AlphaGPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.d_model = 64
-        # self.features_list = ['RET', 'VOL', 'V_CHG', 'PV', 'TREND']
-        self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL', 'VOL_CLUSTER', 'MOM_REV', 'REL_STRENGTH', 'HL_RANGE', 'CLOSE_POS', 'VOL_TREND', 'CONST_1', 'CONST_E', 'CONST_10', 'CONST_100']
+        # 期货特有因子：OI_MOM, TERM_SLOPE, NIGHT_PREM, LIMIT_HIT, BASIS_MOM
+        self.features_list = FuturesFactorEngineer.FEATURE_NAMES
         self.ops_list = [cfg[0] for cfg in OPS_CONFIG] 
         self.ops_norm_list = [cfg[0] for cfg in OPS_NORM_CONFIG]
         self.ops_arities = [cfg[2] for cfg in OPS_CONFIG] 

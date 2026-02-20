@@ -1,10 +1,10 @@
 import torch
 from .ops import OPS_CONFIG
-from .factors import FeatureEngineer
+from .factors import FuturesFactorEngineer
 
 class StackVM:
     def __init__(self):
-        self.feat_offset = FeatureEngineer.INPUT_DIM
+        self.feat_offset = FuturesFactorEngineer.INPUT_DIM
         self.op_map = {i + self.feat_offset: cfg[1] for i, cfg in enumerate(OPS_CONFIG)}
         self.arity_map = {i + self.feat_offset: cfg[2] for i, cfg in enumerate(OPS_CONFIG)}
 

@@ -1,10 +1,10 @@
 import torch
 from .ops import _op_gate, _op_jump, _op_decay, _ts_delay, _op_tanh, _op_ts_zscore_rolling, _op_rolling_mean, OPS_CONFIG, OPS_NORM_CONFIG
-from .factors import FeatureEngineer, KlinesFeatureEngineer
+from .factors import FuturesFactorEngineer
 
 class JITFormulaCompiler:
     def __init__(self):
-        self.feat_offset = KlinesFeatureEngineer.INPUT_DIM
+        self.feat_offset = FuturesFactorEngineer.INPUT_DIM
         # 建立索引与算子名称、参数数量的映射
         self.op_names = [cfg[0] for cfg in OPS_CONFIG] + [cfg[0] for cfg in OPS_NORM_CONFIG]
         self.arities = [cfg[2] for cfg in OPS_CONFIG] + [cfg[2] for cfg in OPS_NORM_CONFIG]

@@ -1,211 +1,230 @@
+"""
+中国期货市场回测模块
+- 输出兼容聚宽格式：trade_date, symbol, factor_value, forward_return
+- forward_return 含主力切换换仓成本
+"""
 import torch
 import math
+import pandas as pd
+from typing import Tuple, Optional
+from .config import ModelConfig
 
-class MemeBacktest:
-    def __init__(self):
-        self.trade_size = 1000.0
-        self.min_liq = 500000.0
-        self.base_fee = 0.0060
 
-    def evaluate(self, factors, raw_data, target_ret):
-        liquidity = raw_data['liquidity']
-        signal = torch.sigmoid(factors)
-        is_safe = (liquidity > self.min_liq).float()
-        position = (signal > 0.85).float() * is_safe
-        impact_slippage = self.trade_size / (liquidity + 1e-9)
-        impact_slippage = torch.clamp(impact_slippage, 0.0, 0.05)
-        total_slippage_one_way = self.base_fee + impact_slippage
-        prev_pos = torch.roll(position, 1, dims=1)
-        prev_pos[:, 0] = 0
-        turnover = torch.abs(position - prev_pos)
-        tx_cost = turnover * total_slippage_one_way
-        gross_pnl = position * target_ret
-        net_pnl = gross_pnl - tx_cost
-        cum_ret = net_pnl.sum(dim=1)
-        big_drawdowns = (net_pnl < -0.05).float().sum(dim=1)
-        score = cum_ret - (big_drawdowns * 2.0)
-        activity = position.sum(dim=1)
-        score = torch.where(activity < 5, torch.tensor(-10.0, device=score.device), score)
-        final_fitness = torch.median(score)
-        return final_fitness, cum_ret.mean().item()
-    
-
-class MainCoinBacktest:
+def to_joinquant_format(
+    trade_dates: pd.DatetimeIndex,
+    symbol: str,
+    factor_values: torch.Tensor,
+    forward_returns: torch.Tensor,
+) -> pd.DataFrame:
     """
-    ETH/主流币 1h 频率回测。阈值与交易次数相关参数已针对 1h 数据做了默认优化。
+    输出聚宽兼容格式
+    列: trade_date (Date), symbol (str), factor_value (Float64), forward_return (Float64)
+    """
+    if factor_values.dim() > 1:
+        factor_values = factor_values.squeeze()
+    if forward_returns.dim() > 1:
+        forward_returns = forward_returns.squeeze()
+    n = min(len(trade_dates), factor_values.numel(), forward_returns.numel())
+    f = factor_values.cpu().numpy()[:n]
+    r = forward_returns.cpu().numpy()[:n]
+    return pd.DataFrame({
+        'trade_date': trade_dates[:n],
+        'symbol': symbol,
+        'factor_value': f.astype('float64'),
+        'forward_return': r.astype('float64'),
+    })
+
+
+class FuturesBacktest:
+    """
+    期货因子回测
+    - 涨跌停日过滤（因子置 null 不参与信号）
+    - 换仓成本计入 forward_return
+    - 输出聚宽格式
+    - 持仓规则：盈利目标/止损/最大持仓 K bar 平仓；信号反向后立即平仓并反向开仓
     """
     def __init__(
         self,
-        trade_size=1000.0,
-        base_fee=0.0005,
-        impact_slippage=0.0001,
-        # Z-score 下多空阈值：2.0 很保守、交易少；1.5~1.75 更适配 1h 提高交易次数
-        zscore_long=1.5,
-        zscore_short=-1.5,
-        # 非 Z-score 时多空阈值（假设因子约在 [-1, 1]）
-        quantile_long=0.85,
-        quantile_short=-0.85,
-        # 最少“在仓” bar 数，用于连续惩罚的参考线
-        min_activity_bars=80,
-        # 最少换手次数（发生仓位变化的 bar 数），用于连续惩罚的参考线
-        min_trades=50,
-        # 活跃度不足时的连续惩罚系数（惩罚 = scale * relu(min_activity - activity)）
-        activity_penalty_scale=0.02,
-        # 交易次数不足时的连续惩罚系数（惩罚 = scale * relu(min_trades - trade_count)）
-        trade_penalty_scale=0.02,
-        # 单 bar 净亏损超过该比例算一次“大回撤”，计入惩罚
-        big_drawdown_threshold=-0.02,
-        big_drawdown_penalty=2.0,
+        base_fee: float = None,
+        impact_slippage: float = None,
+        zscore_long: float = 1.5,
+        zscore_short: float = -1.5,
+        min_activity_bars: int = 20,
+        min_trades: int = 10,
+        big_drawdown_threshold: float = -0.02,
+        big_drawdown_penalty: float = 2.0,
+        profit_target: float = None,
+        stop_loss: float = None,
+        max_hold_bars: int = None,
     ):
-        self.trade_size = trade_size
-        self.base_fee = base_fee
-        self.impact_slippage = impact_slippage
+        self.base_fee = base_fee or ModelConfig.BASE_FEE
+        self.impact_slippage = impact_slippage or ModelConfig.IMPACT_SLIPPAGE
         self.zscore_long = zscore_long
         self.zscore_short = zscore_short
-        self.quantile_long = quantile_long
-        self.quantile_short = quantile_short
         self.min_activity_bars = min_activity_bars
         self.min_trades = min_trades
-        self.activity_penalty_scale = activity_penalty_scale
-        self.trade_penalty_scale = trade_penalty_scale
         self.big_drawdown_threshold = big_drawdown_threshold
         self.big_drawdown_penalty = big_drawdown_penalty
+        self.profit_target = profit_target if profit_target is not None else ModelConfig.PROFIT_TARGET
+        self.stop_loss = stop_loss if stop_loss is not None else ModelConfig.STOP_LOSS
+        self.max_hold_bars = max_hold_bars if max_hold_bars is not None else ModelConfig.MAX_HOLD_BARS
 
-    def _calc_purified_ic(self, factor_raw, future_returns, market_returns=None, method='pearson'):
+    def _evaluate_single(
+        self,
+        signal: torch.Tensor,
+        target_ret: torch.Tensor,
+        norm_type: str = 'ZSCORE_ROLL',
+        threshold: Tuple[float, float] = (1.5, -1.5),
+    ) -> Tuple[torch.Tensor, float, float]:
         """
-        计算剔除了市场 Beta 影响后的纯净 IC
-        
-        Args:
-            factor_raw: [B, T] or [T], 你的原始因子
-            future_returns: [B, T] or [T], 未来收益率 (Label)
-            market_returns: [B, T] or [T], 市场基准收益率 (用于剔除 Beta)
-            method: 'pearson' or 'rank' (Spearman)
+        基于盈亏比与持仓时间的回测逻辑：
+        - 信号 +1 做多，-1 做空
+        - 信号 0：不立即平仓，按盈利目标/止损/最大持仓 K bar 决定是否平仓
+        - 信号同向：不加仓，继续持有
+        - 信号反向：立即平仓并反向开仓，然后按上述规则持仓
         """
-        # 1. 预处理：确保无 NaN
-        mask = ~torch.isnan(factor_raw) & ~torch.isnan(future_returns)
-        if market_returns is not None:
-            mask &= ~torch.isnan(market_returns)
-            
-        f = factor_raw[mask].float()
-        r = future_returns[mask].float()
-        
-        # 2. 正交化：剔除市场 Beta (如果有基准)
-        # 也就是计算：Returns 对 Market 的回归残差
-        # 或者是：Factor 对 Market 的回归残差 (通常对 Factor 做正交化更稳健)
-        if market_returns is not None:
-            m = market_returns[mask].float()
-            
-            # 线性回归: F = beta * M + alpha
-            # beta = Cov(F, M) / Var(M)
-            # 简单的一元回归写法:
-            m_centered = m - m.mean()
-            f_centered = f - f.mean()
-            
-            beta = (m_centered * f_centered).sum() / (m_centered ** 2).sum()
-            f_residual = f - beta * m
-            
-            # 使用这一步处理后的因子替代原始因子
-            f = f_residual
+        # 离散化信号：+1 多，-1 空，0 中性（不触发新开仓，但持仓时按规则处理）
+        if signal.dim() == 1:
+            signal = signal.unsqueeze(0)
+        sig_long = (signal > threshold[0]).float()
+        sig_short = (signal < threshold[1]).float()
+        raw_signal = sig_long - sig_short  # +1, -1, 0
 
-        # 3. 计算 IC
-        if method == 'rank':
-            # PyTorch 的 argsort 两次可以得到 rank
-            f_rank = f.argsort().argsort().float()
-            r_rank = r.argsort().argsort().float()
-            
-            # 归一化 rank 到 [0, 1] 或 Z-score 也可以，直接算 Pearson 即可等价于 Spearman
-            f = f_rank
-            r = r_rank
+        B, T = raw_signal.shape
+        tx_cost_one = self.base_fee + self.impact_slippage
+        net_pnl = torch.zeros_like(raw_signal)
+        trade_count = torch.zeros(B, device=raw_signal.device)
 
-        # 计算 Pearson Correlation
-        vx = f - torch.mean(f)
-        vy = r - torch.mean(r)
-        
-        ic = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)))
-        
-        return ic
+        def get_ret(b, t):
+            if target_ret.dim() == 1:
+                return target_ret[t].item()
+            return target_ret[b, t].item()
 
-    def _evaluate_single(self, signal, target_ret, norm_type='ZSCORE_ROLL', threshold=(0.85, -0.85)):
-        # 2. 建立多空头寸（阈值可配置，适配 1h 提高交易次数）
-        if norm_type == 'ZSCORE_ROLL':
-            position_long = (signal > threshold[0]).float()
-            position_short = (signal < threshold[1]).float()
-        else:
-            position_long = (signal > threshold[0]).float()
-            position_short = (signal < threshold[1]).float()            
-        
-        # 关键：空头应该是负权，代表方向
-        position = position_long - position_short 
-        
-        # 3. 计算交易成本
-        total_slippage_one_way = self.base_fee + self.impact_slippage
-        
-        # 计算换手率与交易次数：使用差分
-        # position 形状 [B, T]
-        prev_pos = torch.zeros_like(position)
-        prev_pos[:, 1:] = position[:, :-1]
+        for b in range(B):
+            pos = 0
+            cum_ret = 0.0
+            bars_held = 0
+            entry_bar = -1
 
-        turnover = torch.abs(position - prev_pos)
-        tx_cost = turnover * total_slippage_one_way
-        # 交易次数：发生仓位变化的 bar 数（用于连续惩罚）
-        trade_count = (position != prev_pos).float().sum(dim=1)
-        
-        # 4. 计算盈亏
-        gross_pnl = position * target_ret
-        net_pnl = gross_pnl - tx_cost
-        
-        # 5. 评分：收益 - 大回撤惩罚 - 活跃度/交易次数不足的连续惩罚（利于 RL 训练）
-        cum_ret = net_pnl.sum(dim=1)
+            for t in range(T):
+                sig_t = int(raw_signal[b, t].item())
 
-        # 夏普比率 (年化，假设 T 为小时线：24*365)
-        mean_ret = net_pnl.mean(dim=1)
-        std_ret = net_pnl.std(dim=1) + 1e-8
-        sharpe = mean_ret / std_ret * math.sqrt(24 * 365)
+                if pos != 0:
+                    # 持仓中：计入上一 bar 到本 bar 的收益（target_ret[t-1] = 从 t-1 到 t 的收益）
+                    if t > 0:
+                        prev_ret = get_ret(b, t - 1)
+                        cum_ret += prev_ret * pos
+                    bars_held += 1
 
-        big_drawdowns = (net_pnl < self.big_drawdown_threshold).float().sum(dim=1)
-        activity = torch.abs(position).sum(dim=1)  # 在仓 bar 数
+                    # 检查退出条件
+                    exit_now = False
+                    if cum_ret >= self.profit_target:
+                        exit_now = True
+                    elif cum_ret <= self.stop_loss:
+                        exit_now = True
+                    elif bars_held >= self.max_hold_bars:
+                        exit_now = True
+                    elif sig_t == -pos:
+                        exit_now = True  # 信号反向：平仓并反向开仓
 
-        # 连续惩罚：交易次数/活跃度越少惩罚越大，无阶跃，便于梯度传播；短序列时放宽
-        T = position.shape[1]
-        min_activity = min(self.min_activity_bars, T // 10)
-        min_trades = min(self.min_trades, T // 20)
-        activity_penalty = self.activity_penalty_scale * torch.relu(
-            min_activity - activity
-        )
-        trade_penalty = self.trade_penalty_scale * torch.relu(
-            min_trades - trade_count
-        )
+                    if exit_now:
+                        # 平仓：净 PnL = 累计收益 - 平仓手续费
+                        net_pnl[b, t] = cum_ret - tx_cost_one
+                        trade_count[b] += 1
+                        pos = 0
+                        cum_ret = 0.0
+                        bars_held = 0
 
-        score = (
-            sharpe
-            - big_drawdowns * self.big_drawdown_penalty
-            - activity_penalty
-            - trade_penalty
-        )
+                        # 若信号反向，立即反向开仓（再扣一次开仓手续费）
+                        if sig_t == -1:
+                            pos = -1
+                            entry_bar = t
+                            cum_ret = 0.0
+                            bars_held = 0
+                            trade_count[b] += 1
+                            net_pnl[b, t] -= tx_cost_one
+                        elif sig_t == 1:
+                            pos = 1
+                            entry_bar = t
+                            cum_ret = 0.0
+                            bars_held = 0
+                            trade_count[b] += 1
+                            net_pnl[b, t] -= tx_cost_one
+                    else:
+                        net_pnl[b, t] = 0.0
+                else:
+                    # 空仓：检查新开仓
+                    if sig_t == 1:
+                        pos = 1
+                        entry_bar = t
+                        cum_ret = 0.0
+                        bars_held = 0
+                        trade_count[b] += 1
+                        net_pnl[b, t] = -tx_cost_one
+                    elif sig_t == -1:
+                        pos = -1
+                        entry_bar = t
+                        cum_ret = 0.0
+                        bars_held = 0
+                        trade_count[b] += 1
+                        net_pnl[b, t] = -tx_cost_one
+                    else:
+                        net_pnl[b, t] = 0.0
 
-        return score.mean(), cum_ret.mean().item(), trade_count.mean().item()        
+        cum_ret_total = net_pnl.sum(dim=-1)
+        mean_ret = net_pnl.mean(dim=-1)
+        std_ret = net_pnl.std(dim=-1) + 1e-8
+        sharpe = mean_ret / std_ret * math.sqrt(252)
+        activity = (net_pnl != 0).float().sum(dim=-1)
+        big_drawdowns = (net_pnl < self.big_drawdown_threshold).float().sum(dim=-1)
+        activity_penalty = 0.02 * torch.relu(self.min_activity_bars - activity)
+        trade_penalty = 0.02 * torch.relu(self.min_trades - trade_count)
+        score = sharpe - big_drawdowns * self.big_drawdown_penalty - activity_penalty - trade_penalty
+        return score.mean(), cum_ret_total.mean().item(), trade_count.mean().item()
 
-    def evaluate(self, factors, raw_data, target_ret, norm_type='ZSCORE_ROLL'):
-        # 1. 把映射也当作一个OP
+    def evaluate(
+        self,
+        factors: torch.Tensor,
+        raw_data: dict,
+        target_ret: torch.Tensor,
+        norm_type: str = 'ZSCORE_ROLL',
+    ) -> Tuple[float, float, float, float, Optional[Tuple[float, float]]]:
+        """
+        评估因子
+        返回: (score, cum_ret, correlation, trade_count, best_threshold)
+        """
         signal = factors
+        if signal.dim() == 3:
+            signal = signal.squeeze(0)
+        # 计算因子与收益的相关系数
+        f_flat = (factors.flatten(0, 1) if factors.dim() > 2 else factors).flatten()
+        r_flat = target_ret.expand_as(factors).flatten()
+        mask = ~(torch.isnan(f_flat) | torch.isnan(r_flat))
+        try:
+            if mask.sum() > 10:
+                cf = f_flat[mask]
+                cr = r_flat[mask]
+                correlation = torch.corrcoef(torch.stack([cf, cr]))[0, 1].item()
+            else:
+                correlation = 0.0
+        except Exception:
+            correlation = 0.0
+        correlation = 0.0 if (correlation != correlation) else correlation
 
-        combined = torch.cat([factors, target_ret], dim=0)
-        # 计算相关系数矩阵（因子与收益）；最后一行是 target，取首行与 target 的相关系数
-        corr_matrix = torch.corrcoef(combined)
-        correlation = torch.nan_to_num(corr_matrix[0, -1], nan=0.0)
-
-        best_threshold = None
         best_score = -float('inf')
-        if norm_type == 'ZSCORE_ROLL':
-            threshold_list = [(1.0, -1.0), (1.5, -1.5), (2.0, -2.0)]
-        else:
-            threshold_list = [(0.1, -0.1), (0.5, -0.5), (0.85, -0.85)]
-        
-        for threshold in threshold_list:
-            score, ret_val, trade_count = self._evaluate_single(signal, target_ret, norm_type, threshold)
+        best_ret = 0.0
+        best_trades = 0.0
+        best_threshold = None
+        for th in [(1.0, -1.0), (1.5, -1.5), (2.0, -2.0)]:
+            score, ret_val, trade_count = self._evaluate_single(signal, target_ret, norm_type, th)
             if score.item() > best_score:
-                best_score = score
-                best_ret_val = ret_val
-                best_trade_count = trade_count
-                best_threshold = threshold
-        return best_score, best_ret_val, correlation.item(), best_trade_count, best_threshold
+                best_score = score.item()
+                best_ret = ret_val
+                best_trades = trade_count
+                best_threshold = th
+        return best_score, best_ret, correlation, best_trades, best_threshold
+
+
+# 兼容旧接口
+MemeBacktest = FuturesBacktest
+MainCoinBacktest = FuturesBacktest

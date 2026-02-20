@@ -1,3 +1,7 @@
+"""
+中国期货市场 AlphaGPT 训练引擎
+基于 Tushare Pro 数据源，期货因子挖掘
+"""
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
@@ -6,40 +10,58 @@ import json
 import numpy as np
 
 from .config import ModelConfig
-from .data_loader import CryptoDataLoader
+from .data_loader import FuturesDataLoader
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
 from .formula import JITFormulaCompiler
-from .backtest import MemeBacktest, MainCoinBacktest
+from .backtest import FuturesBacktest
 from .utils import check_tensor_nan
 
 from torch.utils.tensorboard import SummaryWriter
 import os
 from datetime import datetime
 
-# 建议使用带时间戳的路径，避免多次实验的数据混在一起
 log_dir = os.path.join("logs", datetime.now().strftime("%Y%m%d-%H%M%S"))
 writer = SummaryWriter(log_dir=log_dir)
 
+
 class AlphaEngine:
-    def __init__(self, data_path='./data/ETHUSDT-futures_1h_2020-01-01-2026-02-02.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
+    def __init__(
+        self,
+        ts_code: str = 'RB.SHF',
+        start_date: str = '20200101',
+        end_date: str = '20241231',
+        token: str = None,
+        cache_path: str = None,
+        use_lord_regularization: bool = True,
+        lord_decay_rate: float = 1e-3,
+        lord_num_iterations: int = 5,
+    ):
         """
-        Initialize AlphaGPT training engine.
+        期货因子挖掘引擎
         
         Args:
-            use_lord_regularization: Enable Low-Rank Decay (LoRD) regularization
-            lord_decay_rate: Strength of LoRD regularization
-            lord_num_iterations: Number of Newton-Schulz iterations per step
+            ts_code: 主力合约代码，如 RB.SHF（螺纹钢）、IF.CFX（沪深300）
+            start_date: 开始日期 YYYYMMDD
+            end_date: 结束日期 YYYYMMDD
+            token: Tushare token
+            cache_path: 数据缓存路径
+            use_lord_regularization: 是否启用 LoRD 正则
+            lord_decay_rate: LoRD 衰减率
+            lord_num_iterations: LoRD 迭代次数
         """
-        self.loader = CryptoDataLoader(data_path)        
-        self.loader.load_klines_data()    
+        self.loader = FuturesDataLoader(
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            token=token or ModelConfig.TUSHARE_TOKEN,
+            cache_path=cache_path,
+        )
+        self.loader.load()
         
         self.model = AlphaGPT().to(ModelConfig.DEVICE)
-        
-        # Standard optimizer
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-4)
         
-        # Low-Rank Decay regularizer
         self.use_lord = use_lord_regularization
         if self.use_lord:
             self.lord_opt = NewtonSchulzLowRankDecay(
@@ -58,7 +80,7 @@ class AlphaEngine:
         
         self.vm = StackVM()
         self.compiler = JITFormulaCompiler()
-        self.bt = MainCoinBacktest()
+        self.bt = FuturesBacktest()
         
         self.best_score = -float('inf')
         self.best_corr = -float('inf')
@@ -73,14 +95,12 @@ class AlphaEngine:
         }
 
     def train(self):
-        print("🚀 Starting Alpha Mining with PPO" + (" + LoRD" if self.use_lord else "") + " ...")
-        if self.use_lord:
-            print(f"   LoRD Regularization enabled")
-            print(f"   Target keywords: ['q_proj', 'k_proj', 'attention', 'qk_norm']")
+        print("🚀 期货因子挖掘 (AlphaGPT + PPO)" + (" + LoRD" if self.use_lord else "") + " ...")
+        print(f"   品种: {self.loader.ts_code}")
         print(f"   PPO: clip_eps={ModelConfig.PPO_CLIP_EPS}, value_coef={ModelConfig.PPO_VALUE_COEF}, epochs={ModelConfig.PPO_EPOCHS}")
 
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
-        L = ModelConfig.MAX_FORMULA_LEN + 1  # 动作数
+        L = ModelConfig.MAX_FORMULA_LEN + 1
 
         for step in pbar:
             bs = ModelConfig.BATCH_SIZE
@@ -90,7 +110,6 @@ class AlphaEngine:
             tokens_list = []
             stack_sizes = torch.zeros(bs, dtype=torch.int32).to(inp.device)
 
-            # 采样轨迹，并记录每步的 log_prob 与 value（供 PPO 用）
             for _ in range(L):
                 logits, value, _ = self.model(inp, stack_sizes)
                 dist = Categorical(logits=logits)
@@ -101,7 +120,7 @@ class AlphaEngine:
                 inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
                 stack_sizes = self.model.compute_stack_size(stack_sizes, action)
 
-            seqs = torch.stack(tokens_list, dim=1)  # [B, L]
+            seqs = torch.stack(tokens_list, dim=1)
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
             legal_cnt = 0
             score_list, corr_list, trade_count_list, threshold_list = [], [], [], []
@@ -141,30 +160,28 @@ class AlphaEngine:
                     self.best_score = score.item()
                     self.best_formula = formula
                     self.best_threshold = best_threshold
-                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count} | Threshold {best_threshold}")
+                    tqdm.write(f"[!] 新最优: Score {score:.2f} | Ret {ret_val:.2%} | Corr {corr} | Trades {trade_count} | Threshold {best_threshold}")
                 if abs(corr) > self.best_corr:
                     self.best_corr = abs(corr)
-                    tqdm.write(f"[!] New Corr King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count} | Threshold {best_threshold}")
+                    tqdm.write(f"[!] 新相关: Score {score:.2f} | Corr {corr} | Trades {trade_count}")
 
             rewards = torch.nan_to_num(rewards, nan=-5.0)
 
-            # 构造 PPO 所需张量
-            old_log_probs = torch.stack(log_probs_old, dim=1)   # [B, L]
-            old_values = torch.stack(values_old, dim=1)         # [B, L]
-            returns_ppo = rewards.unsqueeze(1).expand(-1, L)     # 终端 reward，每步相同
+            old_log_probs = torch.stack(log_probs_old, dim=1)
+            old_values = torch.stack(values_old, dim=1)
+            returns_ppo = rewards.unsqueeze(1).expand(-1, L)
             advantages = returns_ppo - old_values.detach()
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-            full_idx = torch.cat([torch.zeros(bs, 1, dtype=torch.long, device=ModelConfig.DEVICE), seqs], dim=1)  # [B, L+1]
+            full_idx = torch.cat([torch.zeros(bs, 1, dtype=torch.long, device=ModelConfig.DEVICE), seqs], dim=1)
 
-            # PPO 多轮更新
             total_policy_loss = 0.0
             total_value_loss = 0.0
             total_entropy = 0.0
             n_ppo = 0
             for _ in range(ModelConfig.PPO_EPOCHS):
-                new_logits, new_values = self.model.forward_sequence(full_idx)  # [B, L, V], [B, L]
-                new_log_probs = torch.log_softmax(new_logits, dim=-1).gather(2, seqs.unsqueeze(-1)).squeeze(-1)  # [B, L]
+                new_logits, new_values = self.model.forward_sequence(full_idx)
+                new_log_probs = torch.log_softmax(new_logits, dim=-1).gather(2, seqs.unsqueeze(-1)).squeeze(-1)
                 dist_new = torch.distributions.Categorical(logits=new_logits)
                 entropy = dist_new.entropy().mean()
 
@@ -219,22 +236,56 @@ class AlphaEngine:
             writer.add_text('Train/best_formula_exprs', self.model.translate_to_exprs(self.best_formula), step)
             writer.add_text('Train/best_threshold', str(self.best_threshold), step)
 
-        # Save best formula
-        with open("best_meme_strategy.json", "w") as f:
+        with open("best_futures_strategy.json", "w") as f:
             json.dump(self.best_formula, f)
         
-        # Save training history
         import json as js
         with open("training_history.json", "w") as f:
             js.dump(self.training_history, f)
         
-        print(f"\n✓ Training completed!")
-        print(f"  Best score: {self.best_score:.4f}")
-        print(f"  Best formula: {self.best_formula}")
+        print(f"\n✓ 训练完成!")
+        print(f"  最优得分: {self.best_score:.4f}")
+        print(f"  最优公式: {self.best_formula}")
 
         writer.close()
 
+    def export_joinquant(self, formula_tokens: list = None, output_path: str = None) -> pd.DataFrame:
+        """
+        导出聚宽兼容格式因子表
+        列: trade_date, symbol, factor_value, forward_return
+        """
+        import pandas as pd
+        from .backtest import to_joinquant_format
+        
+        tokens = formula_tokens or self.best_formula
+        if tokens is None:
+            raise ValueError("无可用公式，请先训练或传入 formula_tokens")
+        
+        fast_factor_func = self.compiler.compile(tokens)
+        if fast_factor_func is None:
+            raise ValueError("公式编译失败")
+        
+        factors = fast_factor_func(self.loader.feat_tensor)
+        if factors is None:
+            raise ValueError("因子计算失败")
+        
+        df = to_joinquant_format(
+            self.loader.dates,
+            self.loader.symbol,
+            factors,
+            self.loader.target_ret,
+        )
+        if output_path:
+            df.to_parquet(output_path)
+            print(f"📤 聚宽格式因子已保存: {output_path}")
+        return df
+
 
 if __name__ == "__main__":
-    eng = AlphaEngine(use_lord_regularization=True)
+    eng = AlphaEngine(
+        ts_code='RB.SHF',
+        start_date='20200101',
+        end_date='20241231',
+        use_lord_regularization=True,
+    )
     eng.train()
