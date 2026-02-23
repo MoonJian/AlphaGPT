@@ -23,7 +23,7 @@ class MemeIndicators:
         return torch.clamp(ratio * 4.0, 0.0, 1.0)
 
     @staticmethod
-    def buy_sell_imbalance(close, open_, high, low):
+    def oc_in_hl_ratio(close, open_, high, low):
         range_hl = high - low + 1e-9
         body = close - open_
         strength = body / range_hl
@@ -34,6 +34,7 @@ class MemeIndicators:
         vol_prev = torch.roll(volume, 1, dims=1)
         vol_chg = (volume - vol_prev) / (vol_prev + 1.0)
         acc = vol_chg - torch.roll(vol_chg, 1, dims=1)
+        acc[:, :2] = 0
         return torch.clamp(acc, -5.0, 5.0)
 
     @staticmethod
@@ -67,8 +68,9 @@ class MemeIndicators:
         
         # Detect reversals
         mom_prev = torch.roll(mom, 1, dims=1)
-        reversal = (mom * mom_prev < 0).float()
-        
+        prod = mom * mom_prev
+        reversal = (prod < 0).float()
+
         return reversal
 
     @staticmethod
@@ -117,7 +119,7 @@ class AdvancedFactorEngineer:
         # Basic factors
         ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))
         liq_score = MemeIndicators.liquidity_health(liq, fdv)
-        pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
+        oc_ratio = MemeIndicators.oc_in_hl_ratio(c, o, h, l)
         fomo = MemeIndicators.fomo_acceleration(v)
         dev = MemeIndicators.pump_deviation(c)
         log_vol = torch.log1p(v)
@@ -140,7 +142,7 @@ class AdvancedFactorEngineer:
         features = torch.stack([
             self.robust_norm(ret),
             liq_score,
-            pressure,
+            oc_ratio,
             self.robust_norm(fomo),
             self.robust_norm(dev),
             self.robust_norm(log_vol),
@@ -170,7 +172,7 @@ class FeatureEngineer:
         
         ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))
         # liq_score = MemeIndicators.liquidity_health(liq, fdv)
-        pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
+        oc_ratio = MemeIndicators.oc_in_hl_ratio(c, o, h, l)
         # fomo = MemeIndicators.fomo_acceleration(v)
         dev = MemeIndicators.pump_deviation(c)
         # log_vol = torch.log1p(v)
@@ -184,7 +186,7 @@ class FeatureEngineer:
         features = torch.stack([
             robust_norm(ret),
             # liq_score,
-            pressure,
+            oc_ratio,
             # robust_norm(fomo),
             robust_norm(dev),
             # robust_norm(log_vol)
@@ -194,7 +196,7 @@ class FeatureEngineer:
 
 
 class KlinesFeatureEngineer:
-    INPUT_DIM = 16
+    INPUT_DIM = 26
 
     @staticmethod
     def compute_features(raw_dict):
@@ -211,17 +213,32 @@ class KlinesFeatureEngineer:
         const_100 = torch.full(c.shape, 100, dtype=torch.float32).to(c.device)
         
         ret = torch.log(c / (torch.roll(c, 1, dims=1) + 1e-9))
-        pressure = MemeIndicators.buy_sell_imbalance(c, o, h, l)
-        fomo = MemeIndicators.fomo_acceleration(v)
-        dev = MemeIndicators.pump_deviation(c)
+        oc_ratio = MemeIndicators.oc_in_hl_ratio(c, o, h, l)
+        
+        fomo_5 = MemeIndicators.fomo_acceleration(v, window=5)
+        fomo_15 = MemeIndicators.fomo_acceleration(v, window=15)
+        fomo_30 = MemeIndicators.fomo_acceleration(v, window=30)
+        
+        dev_20 = MemeIndicators.pump_deviation(c)
+        dev_50 = MemeIndicators.pump_deviation(c, window=50)
+        dev_100 = MemeIndicators.pump_deviation(c, window=100)
+        
         log_vol = torch.log1p(v)
         log_buy_vol = torch.log1p(buy_v)
 
         # Advanced factors
         # 按照默认的周期计算
-        vol_cluster = MemeIndicators.volatility_clustering(c)
-        momentum_rev = MemeIndicators.momentum_reversal(c)
-        rel_strength = MemeIndicators.relative_strength(c, h, l)
+        vol_cluster_10 = MemeIndicators.volatility_clustering(c, window=10)
+        vol_cluster_30 = MemeIndicators.volatility_clustering(c, window=30)
+        vol_cluster_60 = MemeIndicators.volatility_clustering(c, window=60)
+
+        momentum_rev_5 = MemeIndicators.momentum_reversal(c, window=5)
+        momentum_rev_15 = MemeIndicators.momentum_reversal(c, window=15)
+        momentum_rev_30 = MemeIndicators.momentum_reversal(c, window=30)
+
+        rel_strength_10 = MemeIndicators.relative_strength(c, h, l, window=10)
+        rel_strength_30 = MemeIndicators.relative_strength(c, h, l, window=30)
+        rel_strength_60 = MemeIndicators.relative_strength(c, h, l, window=60)
 
         # High-low range
         hl_range = (h - l) / (c + 1e-9)        
@@ -271,23 +288,32 @@ class KlinesFeatureEngineer:
             return res # 如果输入是1D，返回1D
 
         features = torch.stack([
-            # robust_norm_rolling(ret), # RET做rolling会损失信息
-            ret,
-            pressure,
-            robust_norm_rolling(fomo),
-            robust_norm_rolling(dev),
+            robust_norm_rolling(ret), 
+            oc_ratio,
+            robust_norm_rolling(fomo_5),
+            robust_norm_rolling(fomo_15),
+            robust_norm_rolling(fomo_30),
+            robust_norm_rolling(dev_20),
+            robust_norm_rolling(dev_50),
+            robust_norm_rolling(dev_100),
             robust_norm_rolling(log_vol),
             robust_norm_rolling(log_buy_vol),
-            robust_norm_rolling(vol_cluster),
-            momentum_rev,
-            robust_norm_rolling(rel_strength),
+            robust_norm_rolling(vol_cluster_10),
+            robust_norm_rolling(vol_cluster_30),
+            robust_norm_rolling(vol_cluster_60),
+            robust_norm_rolling(momentum_rev_5),
+            robust_norm_rolling(momentum_rev_15),
+            robust_norm_rolling(momentum_rev_30),
+            robust_norm_rolling(rel_strength_10),
+            robust_norm_rolling(rel_strength_30),
+            robust_norm_rolling(rel_strength_60),
             robust_norm_rolling(hl_range),
-            close_pos,
+            robust_norm_rolling(close_pos),
             robust_norm_rolling(vol_trend),          
             const_1,
             const_e,
             const_10,
             const_100
-        ], dim=1)
-        
+        ], dim=1)        
+
         return features

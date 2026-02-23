@@ -223,9 +223,18 @@ class LoopedTransformer(nn.Module):
 class AlphaGPT(nn.Module):
     def __init__(self):
         super().__init__()
-        self.d_model = 64
-        # self.features_list = ['RET', 'VOL', 'V_CHG', 'PV', 'TREND']
-        self.features_list = ['RET', 'PRESS', 'FOMO', 'DEV', 'VOL', 'BUY_VOL', 'VOL_CLUSTER', 'MOM_REV', 'REL_STRENGTH', 'HL_RANGE', 'CLOSE_POS', 'VOL_TREND', 'CONST_1', 'CONST_E', 'CONST_10', 'CONST_100']
+        self.d_model = 64        
+        # 与 KlinesFeatureEngineer.compute_features 的 torch.stack 顺序严格对齐
+        self.features_list = [
+            'RET', 'OCINHL', 'FOMO5', 'FOMO15', 'FOMO30',
+            'DEV20', 'DEV50', 'DEV100',
+            'LOG_VOL', 'LOG_BUY_VOL',
+            'VOL_CLUSTER10', 'VOL_CLUSTER30', 'VOL_CLUSTER60',
+            'MOM_REV5', 'MOM_REV15', 'MOM_REV30',
+            'REL_STRENGTH10', 'REL_STRENGTH30', 'REL_STRENGTH60',
+            'HL_RANGE', 'CLOSE_POS', 'VOL_TREND',
+            'CONST_1', 'CONST_E', 'CONST_10', 'CONST_100'
+        ]
         self.ops_list = [cfg[0] for cfg in OPS_CONFIG] 
         self.ops_norm_list = [cfg[0] for cfg in OPS_NORM_CONFIG]
         self.ops_arities = [cfg[2] for cfg in OPS_CONFIG] 
@@ -264,7 +273,8 @@ class AlphaGPT(nn.Module):
         # self._build_valid_masks()
         
         self.max_len = ModelConfig.MAX_FORMULA_LEN
-        self.max_stack = ModelConfig.MAX_FORMULA_LEN
+        # max_stack 必须 >= L，否则连续 L 个 feature 会导致 stack 越界
+        self.max_stack = max(ModelConfig.MAX_FORMULA_LEN, ModelConfig.MAX_FORMULA_LEN + 1)
         self.max_arity = max(self.ops_arities)
         self._precompute_valid_mask()
 
@@ -396,9 +406,9 @@ class AlphaGPT(nn.Module):
                         if r == 1:
                             valid = False
                         else:
-                            # 条件: s ≤ (r-1) × (max_arity - 1)
+                            # 条件: s ≤ (r-1) × (max_arity - 1)，且 s < max_stack 防止越界
                             max_reducible = (r - 1) * (self.max_arity - 1)
-                            valid = (s <= max_reducible)
+                            valid = (s <= max_reducible) and (s < self.max_stack)
                     
                     elif token_id < self.feat_ops_size:  # 操作符
                         op_idx = token_id - self.feat_offset
@@ -419,7 +429,9 @@ class AlphaGPT(nn.Module):
                     
                     mask_3d[s, r, token_id] = valid
         
-        mask_3d[1, 0, -self.ops_norm_size:] = True # 最后ops norm的范围
+        # r=0 和 r=1 时，最后一步允许 norm ops（s=1 时）
+        mask_3d[1, 0, -self.ops_norm_size:] = True
+        mask_3d[1, 1, -self.ops_norm_size:] = True  # 兼容不同 r 计算方式
         self.register_buffer('valid_mask_3d', mask_3d)  # 注册为buffer，随模型移动设备        
 
     def compute_stack_size(self, stack_sizes, actions):        

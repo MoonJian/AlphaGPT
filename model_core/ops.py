@@ -12,13 +12,6 @@ def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch
     mask = (condition > 0).float()
     return mask * x + (1.0 - mask) * y
 
-# @torch.jit.script
-# def _op_jump(x: torch.Tensor) -> torch.Tensor:
-#     mean = x.mean(dim=1, keepdim=True)
-#     std = x.std(dim=1, keepdim=True) + 1e-6
-#     z = (x - mean) / std
-#     return torch.relu(z - 3.0)
-
 @torch.jit.script
 def _op_jump(x: torch.Tensor, window: int = ModelConfig.OP_ROLL_WINDOW) -> torch.Tensor:
 # 强制转换类型确保精度
@@ -65,11 +58,15 @@ def _op_jump(x: torch.Tensor, window: int = ModelConfig.OP_ROLL_WINDOW) -> torch
     return res * mask
 
 @torch.jit.script
-def _op_decay(x: torch.Tensor) -> torch.Tensor:
-    return x + 0.8 * _ts_delay(x, 1) + 0.6 * _ts_delay(x, 2)
+def _op_decay(x: torch.Tensor, window: int=3) -> torch.Tensor:
+    decay_gamma = 0.8
+    res = x
+    for i in range(1, window):
+        res += decay_gamma ** i * _ts_delay(x, i)
+    return res
 
 @torch.jit.script
-def _op_tanh(x: torch.Tensor, window: int=ModelConfig.OP_ROLL_WINDOW) -> torch.Tensor:
+def _op_tanh(x: torch.Tensor) -> torch.Tensor:
     return torch.tanh(x)
 
 @torch.jit.script
@@ -135,15 +132,24 @@ OPS_CONFIG = [
     ('SIGN', torch.sign, 1),
     ('GATE', _op_gate, 3),
     ('JUMP', _op_jump, 1),
-    ('DECAY', _op_decay, 1),
+    ('DECAY3', lambda x: _op_decay(x, 3), 1),
+    ('DECAY5', lambda x: _op_decay(x, 5), 1),
+    ('DECAY10', lambda x: _op_decay(x, 10), 1),
     ('DELAY1', lambda x: _ts_delay(x, 1), 1),
+    ('DELAY3', lambda x: _ts_delay(x, 3), 1),
+    ('DELAY5', lambda x: _ts_delay(x, 5), 1),
     ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1),
-    ('ROLL_MEAN_3', lambda x: _op_rolling_mean(x, 3), 1),
+    ('MAX5', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2), _ts_delay(x,3), _ts_delay(x,4))), 1),
+    ('MAX10', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2), _ts_delay(x,3), _ts_delay(x,4), _ts_delay(x,5), _ts_delay(x,6), _ts_delay(x,7), _ts_delay(x,8), _ts_delay(x,9), _ts_delay(x,10))), 1),
+    ('MIN3', lambda x: torch.min(x, torch.min(_ts_delay(x,1), _ts_delay(x,2))), 1),    
+    ('MIN5', lambda x: torch.min(x, torch.min(_ts_delay(x,1), _ts_delay(x,2), _ts_delay(x,3), _ts_delay(x,4))), 1),    
+    ('MIN10', lambda x: torch.min(x, torch.min(_ts_delay(x,1), _ts_delay(x,2), _ts_delay(x,3), _ts_delay(x,4), _ts_delay(x,5), _ts_delay(x,6), _ts_delay(x,7), _ts_delay(x,8), _ts_delay(x,9), _ts_delay(x,10))), 1),
     ('ROLL_MEAN_5', lambda x: _op_rolling_mean(x, 5), 1),
-    ('ROLL_MEAN_15', lambda x: _op_rolling_mean(x, 15), 1)
+    ('ROLL_MEAN_15', lambda x: _op_rolling_mean(x, 15), 1),
+    ('ROLL_MEAN_30', lambda x: _op_rolling_mean(x, 30), 1),
 ]
 
 OPS_NORM_CONFIG = [
     ('TANH', _op_tanh, 1),
-    ('ZSCORE_ROLL', _op_ts_zscore_rolling, 1)
+    # ('ZSCORE_ROLL', _op_ts_zscore_rolling, 1)
 ]

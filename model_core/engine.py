@@ -22,7 +22,7 @@ log_dir = os.path.join("logs", datetime.now().strftime("%Y%m%d-%H%M%S"))
 writer = SummaryWriter(log_dir=log_dir)
 
 class AlphaEngine:
-    def __init__(self, data_path='./data/ETHUSDT-futures_1h_2020-01-01-2026-02-02.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
+    def __init__(self, data_path='./data/ETHUSDT-futures_15m_2020-01-01-2026-02-20.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
         """
         Initialize AlphaGPT training engine.
         
@@ -73,11 +73,11 @@ class AlphaEngine:
         }
 
     def train(self):
-        print("🚀 Starting Alpha Mining with PPO" + (" + LoRD" if self.use_lord else "") + " ...")
+        print("🚀 Starting Alpha Mining with REINFORCE+Baseline" + (" + LoRD" if self.use_lord else "") + " ...")
         if self.use_lord:
             print(f"   LoRD Regularization enabled")
             print(f"   Target keywords: ['q_proj', 'k_proj', 'attention', 'qk_norm']")
-        print(f"   PPO: clip_eps={ModelConfig.PPO_CLIP_EPS}, value_coef={ModelConfig.PPO_VALUE_COEF}, epochs={ModelConfig.PPO_EPOCHS}")
+        print(f"   Policy: value_coef={ModelConfig.VALUE_COEF}, entropy_coef={ModelConfig.ENTROPY_COEF}")
 
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
         L = ModelConfig.MAX_FORMULA_LEN + 1  # 动作数
@@ -90,7 +90,7 @@ class AlphaEngine:
             tokens_list = []
             stack_sizes = torch.zeros(bs, dtype=torch.int32).to(inp.device)
 
-            # 采样轨迹，并记录每步的 log_prob 与 value（供 PPO 用）
+            # 采样轨迹，并记录每步的 log_prob 与 value（供 REINFORCE+baseline 用）
             for _ in range(L):
                 logits, value, _ = self.model(inp, stack_sizes)
                 dist = Categorical(logits=logits)
@@ -108,7 +108,7 @@ class AlphaEngine:
 
             for i in range(bs):
                 formula = seqs[i].tolist()
-                fast_factor_func = self.compiler.compile(formula)
+                fast_factor_func = self.compiler.compile(formula)       
                 if fast_factor_func is None:
                     rewards[i] = -5.0
                     continue
@@ -128,17 +128,17 @@ class AlphaEngine:
                 score, ret_val, corr, trade_count, best_threshold = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret, norm_type
                 )
-                score_list.append(score.item())
+                score_list.append(score)
                 corr_list.append(corr)
                 trade_count_list.append(trade_count)
                 threshold_list.append(best_threshold)
                 rewards[i] = (
-                    ModelConfig.REWARD_SCORE_WEIGHT * score.item()
-                    + ModelConfig.REWARD_CORR_WEIGHT * abs(corr)
+                    ModelConfig.REWARD_SCORE_WEIGHT * score
+                    # + ModelConfig.REWARD_CORR_WEIGHT * abs(corr)
                 )
 
-                if score.item() > self.best_score:
-                    self.best_score = score.item()
+                if score > self.best_score:
+                    self.best_score = score
                     self.best_formula = formula
                     self.best_threshold = best_threshold
                     tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count} | Threshold {best_threshold}")
@@ -148,46 +148,38 @@ class AlphaEngine:
 
             rewards = torch.nan_to_num(rewards, nan=-5.0)
 
-            # 构造 PPO 所需张量
+            # 构造 REINFORCE + baseline 所需张量
             old_log_probs = torch.stack(log_probs_old, dim=1)   # [B, L]
             old_values = torch.stack(values_old, dim=1)         # [B, L]
-            returns_ppo = rewards.unsqueeze(1).expand(-1, L)     # 终端 reward，每步相同
-            advantages = returns_ppo - old_values.detach()
+            returns = rewards.unsqueeze(1).expand(-1, L)        # 终端 reward，每步相同
+            advantages = returns - old_values.detach()
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             full_idx = torch.cat([torch.zeros(bs, 1, dtype=torch.long, device=ModelConfig.DEVICE), seqs], dim=1)  # [B, L+1]
 
-            # PPO 多轮更新
-            total_policy_loss = 0.0
-            total_value_loss = 0.0
-            total_entropy = 0.0
-            n_ppo = 0
-            for _ in range(ModelConfig.PPO_EPOCHS):
-                new_logits, new_values = self.model.forward_sequence(full_idx)  # [B, L, V], [B, L]
-                new_log_probs = torch.log_softmax(new_logits, dim=-1).gather(2, seqs.unsqueeze(-1)).squeeze(-1)  # [B, L]
-                dist_new = torch.distributions.Categorical(logits=new_logits)
-                entropy = dist_new.entropy().mean()
+            # 单次前向：REINFORCE + baseline（无 PPO 多轮更新）
+            new_logits, new_values = self.model.forward_sequence(full_idx)  # [B, L, V], [B, L]
+            dist_new = torch.distributions.Categorical(logits=new_logits)
+            entropy = dist_new.entropy().mean()
 
-                ratio = torch.exp(new_log_probs - old_log_probs.detach())
-                surr1 = ratio * advantages
-                surr2 = torch.clamp(ratio, 1.0 - ModelConfig.PPO_CLIP_EPS, 1.0 + ModelConfig.PPO_CLIP_EPS) * advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(new_values, returns_ppo)
+            # REINFORCE: policy_loss = -E[log π(a|s) * A]，无 clip 与 ratio
+            policy_loss = -(old_log_probs * advantages).mean()
+            value_loss = F.mse_loss(new_values, returns)
 
-                loss = (
-                    policy_loss
-                    + ModelConfig.PPO_VALUE_COEF * value_loss
-                    - ModelConfig.PPO_ENTROPY_COEF * entropy
-                )
-                self.opt.zero_grad()
-                loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 3.0)
-                self.opt.step()
+            loss = (
+                policy_loss
+                + ModelConfig.VALUE_COEF * value_loss
+                - ModelConfig.ENTROPY_COEF * entropy
+            )
 
-                total_policy_loss += policy_loss.item()
-                total_value_loss += value_loss.item()
-                total_entropy += entropy.item()
-                n_ppo += 1
+            self.opt.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 3.0)
+            self.opt.step()
+
+            total_policy_loss = policy_loss.item()
+            total_value_loss = value_loss.item()
+            total_entropy = entropy.item()
 
             if self.use_lord:
                 self.lord_opt.step()
@@ -205,9 +197,9 @@ class AlphaEngine:
             self.training_history['best_score'].append(self.best_score)
             pbar.set_postfix(postfix_dict)
 
-            writer.add_scalar('Train/loss_policy', total_policy_loss / n_ppo, step)
-            writer.add_scalar('Train/loss_value', total_value_loss / n_ppo, step)
-            writer.add_scalar('Train/entropy', total_entropy / n_ppo, step)
+            writer.add_scalar('Train/loss_policy', total_policy_loss, step)
+            writer.add_scalar('Train/loss_value', total_value_loss, step)
+            writer.add_scalar('Train/entropy', total_entropy, step)
             writer.add_scalar('Train/grad_norm', grad_norm.item(), step)
             writer.add_scalar('Train/avg_reward', avg_reward, step)
             writer.add_scalar('Train/best_score', self.best_score, step)
@@ -215,9 +207,10 @@ class AlphaEngine:
                 writer.add_scalar('Train/score', np.mean(score_list), step)
                 writer.add_scalar('Train/corr', np.mean(corr_list), step)
                 writer.add_scalar('Train/trade_count', np.mean(trade_count_list), step)
-            writer.add_text('Train/best_formula', str(self.best_formula), step)
-            writer.add_text('Train/best_formula_exprs', self.model.translate_to_exprs(self.best_formula), step)
-            writer.add_text('Train/best_threshold', str(self.best_threshold), step)
+            if self.best_formula is not None:
+                writer.add_text('Train/best_formula', str(self.best_formula), step)            
+                writer.add_text('Train/best_formula_exprs', self.model.translate_to_exprs(self.best_formula), step)
+                writer.add_text('Train/best_threshold', str(self.best_threshold), step)
 
         # Save best formula
         with open("best_meme_strategy.json", "w") as f:

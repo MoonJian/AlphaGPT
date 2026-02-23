@@ -33,14 +33,23 @@ class JITFormulaCompiler:
             'SIGN': "torch.sign(x0)",
             'GATE': "_op_gate(x0, x1, x2)",
             'JUMP': "_op_jump(x0)",
-            'DECAY': "_op_decay(x0)",
+            'DECAY3': "_op_decay(x0, 3)",
+            'DECAY5': "_op_decay(x0, 5)",
+            'DECAY10': "_op_decay(x0, 10)",
             'DELAY1': "_ts_delay(x0, 1)",
-            'MAX3': "torch.max(x0, torch.max(_ts_delay(x0, 1), _ts_delay(x0, 2)))",
-            'ROLL_MEAN_3': "_op_rolling_mean(x0, 3)",
+            'DELAY3': "_ts_delay(x0, 3)",
+            'DELAY5': "_ts_delay(x0, 5)",
+            'MAX3': "torch.max(torch.stack([x0, _ts_delay(x0, 1), _ts_delay(x0, 2)]), dim=0)[0]",
+            'MAX5': "torch.max(torch.stack([x0, _ts_delay(x0, 1), _ts_delay(x0, 2), _ts_delay(x0, 3), _ts_delay(x0, 4)]), dim=0)[0]",
+            'MAX10': "torch.max(torch.stack([x0, _ts_delay(x0, 1), _ts_delay(x0, 2), _ts_delay(x0, 3), _ts_delay(x0, 4), _ts_delay(x0, 5), _ts_delay(x0, 6), _ts_delay(x0, 7), _ts_delay(x0, 8), _ts_delay(x0, 9), _ts_delay(x0, 10)]), dim=0)[0]",
+            'MIN3': "torch.min(torch.stack([x0, _ts_delay(x0, 1), _ts_delay(x0, 2)]), dim=0)[0]",
+            'MIN5': "torch.min(torch.stack([x0, _ts_delay(x0, 1), _ts_delay(x0, 2), _ts_delay(x0, 3), _ts_delay(x0, 4)]), dim=0)[0]",
+            'MIN10': "torch.min(torch.stack([x0, _ts_delay(x0, 1), _ts_delay(x0, 2), _ts_delay(x0, 3), _ts_delay(x0, 4), _ts_delay(x0, 5), _ts_delay(x0, 6), _ts_delay(x0, 7), _ts_delay(x0, 8), _ts_delay(x0, 9), _ts_delay(x0, 10)]), dim=0)[0]",
             'ROLL_MEAN_5': "_op_rolling_mean(x0, 5)",
             'ROLL_MEAN_15': "_op_rolling_mean(x0, 15)",
+            'ROLL_MEAN_30': "_op_rolling_mean(x0, 30)",
             'TANH': "_op_tanh(x0)",
-            'ZSCORE_ROLL': "_op_ts_zscore_rolling(x0)"
+            # 'ZSCORE_ROLL': "_op_ts_zscore_rolling(x0)"
         }
 
     def get_op_name(self, token):
@@ -49,7 +58,6 @@ class JITFormulaCompiler:
     def compile(self, formula_tokens):
         stack = []
         tokens = formula_tokens.tolist() if isinstance(formula_tokens, torch.Tensor) else formula_tokens
-        
         try:
             for t in tokens:
                 t = int(t)
@@ -94,5 +102,5 @@ class JITFormulaCompiler:
             return jit_func
 
         except Exception as e:
-            # print(f"Compile Error: {e}")
+            print(f"Compile Error: {e}")
             return None
