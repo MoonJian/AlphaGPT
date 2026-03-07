@@ -4,7 +4,7 @@ import os
 class ModelConfig:
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     DB_URL = f"postgresql://{os.getenv('DB_USER','postgres')}:{os.getenv('DB_PASSWORD','password')}@{os.getenv('DB_HOST','localhost')}:5432/{os.getenv('DB_NAME','crypto_quant')}"
-    BATCH_SIZE = 1280
+    BATCH_SIZE = 4096
     TRAIN_STEPS = 10000
     MAX_FORMULA_LEN = 10
     TRADE_SIZE_USD = 1000.0 

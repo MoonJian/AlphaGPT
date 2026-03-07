@@ -273,7 +273,7 @@ class MainCoinBacktest:
             sharpe
             # - big_drawdowns * self.big_drawdown_penalty
             # - activity_penalty
-            # - trade_penalty
+            - trade_penalty
         )
         
         return score.mean(), cum_ret.mean().item(), trade_count.mean().item()        
@@ -292,7 +292,7 @@ class MainCoinBacktest:
             threshold_list = [(1.0, -1.0), (1.5, -1.5), (2.0, -2.0)]
         else:
             # threshold_list = [(0.1, -0.1), (0.5, -0.5), (0.85, -0.85)]
-            threshold_list = [(0.85, -0.85)]
+            threshold_list = [(0.9, -0.9)]
         
         for threshold in threshold_list:
             score, ret_val, trade_count = self._evaluate_single(

@@ -20,7 +20,7 @@ class CryptoDataLoader:
     def load_klines_data(self):
         def to_tensor(col):
             pivot = self.raw_data.pivot(index='open_time', columns='symbol', values=col)
-            pivot = pivot.fillna(method='ffill').fillna(0.0)
+            pivot = pivot.ffill().fillna(0.0)
             return torch.tensor(pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE)
         
         self.raw_data_cache = {

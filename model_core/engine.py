@@ -22,7 +22,7 @@ log_dir = os.path.join("logs", datetime.now().strftime("%Y%m%d-%H%M%S"))
 writer = SummaryWriter(log_dir=log_dir)
 
 class AlphaEngine:
-    def __init__(self, data_path='./data/ETHUSDT-futures_15m_2020-01-01-2026-02-20.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
+    def __init__(self, data_path='./data/ETHUSDT-futures_15m_2020-01-01-2026-02-01.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
         """
         Initialize AlphaGPT training engine.
         
@@ -174,7 +174,7 @@ class AlphaEngine:
                     self.best_corr = abs(corr)
                     tqdm.write(f"[!] New Corr King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula} | Corr {corr} | Trades {trade_count} | Threshold {best_threshold}")
 
-            rewards = torch.nan_to_num(rewards, nan=-5.0)
+            rewards = torch.nan_to_num(rewards, nan=-50.0)
 
             # 1. Reward 归一化：用 EMA 维护 running mean/std，将 reward 缩放到合理范围
             with torch.no_grad():
