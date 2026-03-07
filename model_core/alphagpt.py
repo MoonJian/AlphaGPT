@@ -462,29 +462,8 @@ class AlphaGPT(nn.Module):
         logits, task_probs = self.mtp_head(last_emb)
         value = self.head_critic(last_emb)
 
-        '''
-        masked_logits = torch.zeros_like(logits)
-        for i in range(B):
-            stack = stack_sizes[i].item()
-            if stack not in self.valid_masks:
-                raise Exception(f"Stack size {stack} not found in valid stack mask!")
-            mask = self.valid_masks[stack].to(logits.device)
-            masked_logits[i] = logits[i].masked_fill(mask==0, -1e9)
-        '''
-
         batch_mask = self.valid_mask_3d[stack_sizes, r, :]
         masked_logits = logits.masked_fill(~batch_mask, -1e9)
-
-        if torch.isnan(logits).any():
-            print('idx0: ', idx[0])
-            print(f'stack sizes: ', stack_sizes[0])
-            print('token 0 embed: ', self.token_emb.weight[0])
-            print('pos emb: ', self.pos_emb.weight[0])
-            print('token embed: ', self.token_emb(idx)[0])
-            print('pos embed: ', self.pos_emb[:, :T, :][0])
-            print('last embs: ', last_emb)
-            print(logits)
-            assert 0
 
         return masked_logits, value, task_probs
 

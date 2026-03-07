@@ -84,7 +84,7 @@ class JITFormulaCompiler:
             
             # 构建完整的 Python 函数源码
             func_name = f"factor_gen_{id(formula_tokens)}"
-            source_code = f"def {func_name}(feat_tensor):\n    return {stack[0]}"
+            source_code = f"def {func_name}(feat_tensor): return {stack[0]}"            
             
             # 动态执行定义
             local_vars = {}
@@ -97,10 +97,10 @@ class JITFormulaCompiler:
                 jit_func = torch.jit.script(py_func)
             except:
                 # print('JIT compile failed')
-                return py_func
+                return py_func, source_code
             
-            return jit_func
+            return py_func, source_code 
 
         except Exception as e:
             print(f"Compile Error: {e}")
-            return None
+            return None, source_code

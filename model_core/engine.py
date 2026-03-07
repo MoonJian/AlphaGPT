@@ -64,6 +64,10 @@ class AlphaEngine:
         self.best_corr = -float('inf')
         self.best_threshold = None
         self.best_formula = None
+        # Reward 归一化：EMA 维护 running mean/std，解决 value loss 尺度爆炸
+        self._reward_mean = 0.0
+        self._reward_var = 1.0
+        self._reward_count = 0
         self.training_history = {
             'step': [],
             'avg_reward': [],
@@ -72,12 +76,34 @@ class AlphaEngine:
             'stable_rank': []
         }
 
+    def _check_formula(self, formula):
+        from .ops import _op_tanh, _op_gate, _ts_delay, _op_jump, _op_decay, _op_ts_zscore_rolling, _op_rolling_mean
+        context = {
+            'torch': torch,
+            '_op_gate': _op_gate,
+            '_op_jump': _op_jump,
+            '_op_decay': _op_decay,
+            '_ts_delay': _ts_delay,
+            '_op_tanh': _op_tanh,
+            '_op_ts_zscore_rolling': _op_ts_zscore_rolling,
+            '_op_rolling_mean': _op_rolling_mean
+        }
+
+        fast_factor_func, source_code = self.compiler.compile(formula)
+        if fast_factor_func is None:
+            print("_check_formula: compile failed")
+            return
+        res = fast_factor_func(self.loader.feat_tensor)
+        check_tensor_nan(res)
+        return res
+
     def train(self):
         print("🚀 Starting Alpha Mining with REINFORCE+Baseline" + (" + LoRD" if self.use_lord else "") + " ...")
         if self.use_lord:
             print(f"   LoRD Regularization enabled")
             print(f"   Target keywords: ['q_proj', 'k_proj', 'attention', 'qk_norm']")
         print(f"   Policy: value_coef={ModelConfig.VALUE_COEF}, entropy_coef={ModelConfig.ENTROPY_COEF}")
+        print(f"   Value: gamma={ModelConfig.GAMMA}, reward_norm=True, loss={ModelConfig.VALUE_LOSS_TYPE}")
 
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
         L = ModelConfig.MAX_FORMULA_LEN + 1  # 动作数
@@ -108,25 +134,27 @@ class AlphaEngine:
 
             for i in range(bs):
                 formula = seqs[i].tolist()
-                fast_factor_func = self.compiler.compile(formula)       
+                fast_factor_func, source_code = self.compiler.compile(formula)       
                 if fast_factor_func is None:
-                    rewards[i] = -5.0
+                    rewards[i] = -50.0
                     continue
                 res = fast_factor_func(self.loader.feat_tensor)
                 if res is None:
-                    rewards[i] = -5.0
+                    rewards[i] = -50.0
                     continue
                 if res.std() < 1e-4:
-                    rewards[i] = -10.0
+                    rewards[i] = -100.0
                     continue
+
                 if check_tensor_nan(res, f'res-{i}'):
-                    rewards[i] = -5.0
+                    rewards[i] = -50.0
                     continue
 
                 legal_cnt += 1
                 norm_type = self.compiler.get_op_name(formula[-1])
                 score, ret_val, corr, trade_count, best_threshold = self.bt.evaluate(
-                    res, self.loader.raw_data_cache, self.loader.target_ret, norm_type
+                    res, self.loader.raw_data_cache, self.loader.target_ret, norm_type,
+                    position_mode=ModelConfig.POSITION_MODE
                 )
                 score_list.append(score)
                 corr_list.append(corr)
@@ -148,10 +176,34 @@ class AlphaEngine:
 
             rewards = torch.nan_to_num(rewards, nan=-5.0)
 
+            # 1. Reward 归一化：用 EMA 维护 running mean/std，将 reward 缩放到合理范围
+            with torch.no_grad():
+                batch_mean = rewards.mean().item()
+                batch_var = rewards.var().item()
+                m = ModelConfig.REWARD_NORM_MOMENTUM
+                if self._reward_count == 0:
+                    self._reward_mean = batch_mean
+                    self._reward_var = max(batch_var, 1e-4)
+                    self._reward_count = 1
+                else:
+                    self._reward_mean = m * self._reward_mean + (1 - m) * batch_mean
+                    self._reward_var = m * self._reward_var + (1 - m) * batch_var
+                    self._reward_var = max(self._reward_var, 1e-4)
+                reward_std = (self._reward_var ** 0.5) + 1e-8
+                rewards_norm = (rewards - self._reward_mean) / reward_std
+
+            # 2. Gamma 折扣回报：G_t = γ^(L-1-t) * R，早期步 target 更小，合理时间信用分配
+            #    标准 RL：只有终端 reward 时，G_t = γ^(L-1-t) * R
+            gamma = ModelConfig.GAMMA
+            gamma_powers = torch.pow(
+                gamma,
+                torch.arange(L - 1, -1, -1, dtype=torch.float32, device=rewards.device)
+            )  # [L]: γ^(L-1), γ^(L-2), ..., γ^0
+            returns = rewards_norm.unsqueeze(1) * gamma_powers.unsqueeze(0)  # [B, L]
+
             # 构造 REINFORCE + baseline 所需张量
             old_log_probs = torch.stack(log_probs_old, dim=1)   # [B, L]
             old_values = torch.stack(values_old, dim=1)         # [B, L]
-            returns = rewards.unsqueeze(1).expand(-1, L)        # 终端 reward，每步相同
             advantages = returns - old_values.detach()
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -164,7 +216,11 @@ class AlphaEngine:
 
             # REINFORCE: policy_loss = -E[log π(a|s) * A]，无 clip 与 ratio
             policy_loss = -(old_log_probs * advantages).mean()
-            value_loss = F.mse_loss(new_values, returns)
+            # 3. Value loss：Huber 对异常值更鲁棒，或 MSE
+            if ModelConfig.VALUE_LOSS_TYPE == 'huber':
+                value_loss = F.huber_loss(new_values, returns, delta=ModelConfig.HUBER_DELTA)
+            else:
+                value_loss = F.mse_loss(new_values, returns)
 
             loss = (
                 policy_loss

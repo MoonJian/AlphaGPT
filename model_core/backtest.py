@@ -34,37 +34,44 @@ class MemeBacktest:
 
 class MainCoinBacktest:
     """
-    ETH/主流币 1h 频率回测。阈值与交易次数相关参数已针对 1h 数据做了默认优化。
+    ETH/主流币 15m 频率回测。阈值与交易次数相关参数已针对 15m 数据做了默认优化。
+    1h 数据可传入 bars_per_year=8760，min_activity_bars=80，min_trades=50 等覆盖默认值。
     """
     def __init__(
         self,
         trade_size=1000.0,
         base_fee=0.0005,
         impact_slippage=0.0001,
-        # Z-score 下多空阈值：2.0 很保守、交易少；1.5~1.75 更适配 1h 提高交易次数
+        # 年 bar 数，用于 Sharpe 年化。15m: 35040, 1h: 8760, 1d: 252
+        bars_per_year=35040,
+        # Z-score 下多空阈值。15m 噪音较多，1.5 平衡交易频率
         zscore_long=1.5,
         zscore_short=-1.5,
         # 非 Z-score 时多空阈值（假设因子约在 [-1, 1]）
         quantile_long=0.85,
         quantile_short=-0.85,
-        # 最少“在仓” bar 数，用于连续惩罚的参考线
-        min_activity_bars=80,
-        # 最少换手次数（发生仓位变化的 bar 数），用于连续惩罚的参考线
-        min_trades=50,
+        # 最少“在仓” bar 数。15m: 320 bar≈80h，1h 等价为 80
+        min_activity_bars=320,
+        # 最少换手次数。15m: 4x bar → 200，1h 等价为 50
+        min_trades=200,
         # 活跃度不足时的连续惩罚系数（惩罚 = scale * relu(min_activity - activity)）
         activity_penalty_scale=0.02,
         # 交易次数不足时的连续惩罚系数（惩罚 = scale * relu(min_trades - trade_count)）
         trade_penalty_scale=0.02,
-        # 单 bar 净亏损超过该比例算一次“大回撤”，计入惩罚
-        big_drawdown_threshold=-0.02,
+        # 单 bar 净亏损超过该比例算一次“大回撤”。15m 单 bar 波动更小，-1% 对应 1h 的 -2%
+        big_drawdown_threshold=-0.01,
         big_drawdown_penalty=2.0,
-        take_profit_pct=0.005,
-        stop_loss_pct=-0.003,
-        max_hold_bars=10,
+        # 止盈：15m 单 bar 波动小，0.1% 对应 1h 的 0.5%
+        take_profit_pct=0.001,
+        # 止损：15m 用 -0.1%，1h 等价为 -0.3%
+        stop_loss_pct=-0.001,
+        # 最大持仓 bar 数。15m: 40 bar≈10h，1h 等价为 10
+        max_hold_bars=40,
     ):
         self.trade_size = trade_size
         self.base_fee = base_fee
         self.impact_slippage = impact_slippage
+        self.bars_per_year = bars_per_year
         self.zscore_long = zscore_long
         self.zscore_short = zscore_short
         self.quantile_long = quantile_long
@@ -188,7 +195,48 @@ class MainCoinBacktest:
                     position[b, t] = pos
 
         return position, net_pnl, trade_count
-    def _evaluate_single(self, signal, target_ret, norm_type='ZSCORE_ROLL', threshold=(0.85, -0.85)):
+
+    def _run_discrete_backtest(
+        self,
+        raw_signal: torch.Tensor,
+        target_ret: torch.Tensor,
+        total_slippage: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        不连续持仓：每 bar 独立决策，不跨 bar 持仓。
+        position[t] = signal[t]，即每 bar 仓位等于当期信号，无 TP/SL/持仓时长逻辑。
+        换手时支付交易成本。
+        返回: position [B,T], net_pnl [B,T], trade_count [B]
+        """
+        if raw_signal.dim() == 1:
+            raw_signal = raw_signal.unsqueeze(0)
+        if target_ret.dim() == 1:
+            target_ret = target_ret.unsqueeze(0)
+        B, T = raw_signal.shape
+        if target_ret.shape[0] != B:
+            target_ret = target_ret.expand(B, -1)
+
+        # 离散化信号：+1, -1, 0（向量化）
+        position = torch.nan_to_num(torch.sign(raw_signal), nan=0.0)
+
+        prev_pos = torch.roll(position, 1, dims=1)
+        prev_pos[:, 0] = 0
+        turnover = torch.abs(position - prev_pos)
+        tx_cost = turnover * total_slippage
+        gross_pnl = position * target_ret
+        net_pnl = gross_pnl - tx_cost
+
+        trade_count = (turnover > 0).sum(dim=1).float()
+        return position, net_pnl, trade_count
+
+    def _evaluate_single(
+        self,
+        signal,
+        target_ret,
+        norm_type='ZSCORE_ROLL',
+        threshold=(0.85, -0.85),
+        position_mode='continuous',
+    ):
         # 将因子转为离散信号：+1 多，-1 空，0 观望
         if norm_type == 'ZSCORE_ROLL':
             position_long = (signal > threshold[0]).float()
@@ -199,15 +247,19 @@ class MainCoinBacktest:
         raw_signal = position_long - position_short  # +1, -1, 0
 
         total_slippage = self.base_fee + self.impact_slippage
-        position, net_pnl, trade_count = self._run_rule_based_backtest(
-            raw_signal, target_ret, total_slippage
-        )
+        if position_mode == 'discrete':
+            position, net_pnl, trade_count = self._run_discrete_backtest(
+                raw_signal, target_ret, total_slippage
+            )
+        else:
+            position, net_pnl, trade_count = self._run_rule_based_backtest(
+                raw_signal, target_ret, total_slippage
+            )
 
         cum_ret = net_pnl.sum(dim=1)
         mean_ret = net_pnl.mean(dim=1)
         std_ret = net_pnl.std(dim=1) + 1e-8
-        # 日频用 252，小时频用 24*365
-        sharpe = mean_ret / std_ret * math.sqrt(252)
+        sharpe = mean_ret / std_ret * math.sqrt(self.bars_per_year)
 
         big_drawdowns = (net_pnl < self.big_drawdown_threshold).float().sum(dim=1)
         activity = torch.abs(position).sum(dim=1)
@@ -223,9 +275,10 @@ class MainCoinBacktest:
             # - activity_penalty
             # - trade_penalty
         )
+        
         return score.mean(), cum_ret.mean().item(), trade_count.mean().item()        
 
-    def evaluate(self, factors, raw_data, target_ret, norm_type='ZSCORE_ROLL'):
+    def evaluate(self, factors, raw_data, target_ret, norm_type='ZSCORE_ROLL', position_mode='continuous'):
         # 1. 把映射也当作一个OP
         signal = factors
         combined = torch.cat([factors, target_ret], dim=0)
@@ -238,11 +291,13 @@ class MainCoinBacktest:
         if norm_type == 'ZSCORE_ROLL':
             threshold_list = [(1.0, -1.0), (1.5, -1.5), (2.0, -2.0)]
         else:
-            # threshold_list = [(0.1, -0.1), (0.5, -0.5), (0.75, -0.75)]
-            threshold_list = [(0.75, -0.75)]
+            # threshold_list = [(0.1, -0.1), (0.5, -0.5), (0.85, -0.85)]
+            threshold_list = [(0.85, -0.85)]
         
         for threshold in threshold_list:
-            score, ret_val, trade_count = self._evaluate_single(signal, target_ret, norm_type, threshold)
+            score, ret_val, trade_count = self._evaluate_single(
+                signal, target_ret, norm_type, threshold, position_mode
+            )
             sc = score.item() if hasattr(score, 'item') else float(score)
             if sc > best_score:
                 best_score = sc

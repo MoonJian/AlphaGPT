@@ -40,6 +40,7 @@ def check_tensor_nan(x, name="Tensor", verbose=True, raise_error=False):
         
         if verbose:
             print(msg)
+            pass
             
         if raise_error:
             raise RuntimeError(f"数值崩溃: {name} 包含 NaN/Inf")
@@ -48,9 +49,10 @@ def check_tensor_nan(x, name="Tensor", verbose=True, raise_error=False):
     
     return False
 
-# --- 使用示例 ---
-# 模拟一个 RPN Logits 张量
-logits = torch.randn(2, 10)
-logits[0, 5] = float('nan')
+if __name__ == "__main__":
+    # --- 使用示例 ---
+    # 模拟一个 RPN Logits 张量
+    logits = torch.randn(2, 10)
+    logits[0, 5] = float('nan')
 
-check_tensor_nan(logits, "RPN_Logits_Head")
+    check_tensor_nan(logits, "RPN_Logits_Head")

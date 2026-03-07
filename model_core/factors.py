@@ -314,6 +314,6 @@ class KlinesFeatureEngineer:
             const_e,
             const_10,
             const_100
-        ], dim=1)        
+        ], dim=1)
 
         return features

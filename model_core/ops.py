@@ -62,7 +62,7 @@ def _op_decay(x: torch.Tensor, window: int=3) -> torch.Tensor:
     decay_gamma = 0.8
     res = x
     for i in range(1, window):
-        res += decay_gamma ** i * _ts_delay(x, i)
+        res = res + decay_gamma ** i * _ts_delay(x, i)
     return res
 
 @torch.jit.script
