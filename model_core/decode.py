@@ -13,7 +13,7 @@ from .utils import check_tensor_nan
 
 
 class AlphaEngine:
-    def __init__(self, data_path='./data/ETHUSDT-futures_1h_2020-01-01-2026-02-02.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
+    def __init__(self, data_path='./data/AWSData_1h_2020-01-01-2026-02-02.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
         """
         Initialize AlphaGPT training engine.
         

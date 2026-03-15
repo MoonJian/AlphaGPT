@@ -17,12 +17,22 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 from datetime import datetime
 
+import signal
+import sys
+
+def signal_handler(sig, frame):
+    print(f"Received signal {sig}. Exiting gracefully...")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
 # 建议使用带时间戳的路径，避免多次实验的数据混在一起
 log_dir = os.path.join("logs", datetime.now().strftime("%Y%m%d-%H%M%S"))
 writer = SummaryWriter(log_dir=log_dir)
 
 class AlphaEngine:
-    def __init__(self, data_path='./data/ETHUSDT-futures_15m_2020-01-01-2026-02-01.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
+    def __init__(self, data_path='./data/AWSData_15m_2020-01-01-2026-02-01.parquet', use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
         """
         Initialize AlphaGPT training engine.
         
@@ -117,9 +127,12 @@ class AlphaEngine:
             stack_sizes = torch.zeros(bs, dtype=torch.int32).to(inp.device)
 
             # 采样轨迹，并记录每步的 log_prob 与 value（供 REINFORCE+baseline 用）
+            # 采样温度 >1 时分布更平坦，减轻前期 Categorical 过早尖锐化、陷入局部最优
+            temperature = getattr(ModelConfig, 'SAMPLING_TEMPERATURE', 1.0)
             for _ in range(L):
                 logits, value, _ = self.model(inp, stack_sizes)
-                dist = Categorical(logits=logits)
+                tempered_logits = logits / temperature if temperature != 1.0 else logits
+                dist = Categorical(logits=tempered_logits)
                 action = dist.sample()
                 log_probs_old.append(dist.log_prob(action))
                 values_old.append(value.squeeze(-1))

@@ -18,7 +18,7 @@ from model_core.factors import MemeIndicators, KlinesFeatureEngineer
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data-path', default='./data/ETHUSDT-futures_15m_2020-01-01-2026-02-20.parquet',
+    parser.add_argument('--data-path', default='./data/AWSData_15m_2020-01-01-2026-02-20.parquet',
                         help='K线数据路径')
     parser.add_argument('--output', default='fomo_visualization.png', help='输出图片路径')
     parser.add_argument('--sample', type=int, default=None, help='仅绘制最近 N 个 bar（默认全部）')

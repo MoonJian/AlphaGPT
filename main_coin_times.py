@@ -20,7 +20,7 @@ TRAIN_ITERATIONS = 1000
 MAX_SEQ_LEN = 8            # 限制公式长度，防止过拟合，短小精悍的公式往往更稳
 COST_RATE = 0.0005         # 双边万一 (ETF/IC期货费率较低)，设为万五偏保守
 
-DATA_CACHE_PATH = './data/ETHUSDT-futures_15m_2020-01-01-2026-02-01.parquet' # 缓存文件，如果修改配置需要重命名
+DATA_CACHE_PATH = './data/AWSData_15m_2020-01-01-2026-02-01.parquet' # 缓存文件，如果修改配置需要重命名
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_float32_matmul_precision('high')
 
